@@ -1,6 +1,6 @@
 {
   "name": "dreamshell",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Dreamshell — the Arcadia interface.",
   "private": true,
   "type": "module",

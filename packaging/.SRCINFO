@@ -1,6 +1,6 @@
 pkgbase = arcadia-dreamshell
 	pkgdesc = Linux-native emulation ecosystem (discovers and resumes emulator state)
-	pkgver = 0.1.0
+	pkgver = 0.1.1
 	pkgrel = 1
 	url = https://github.com/Evol-Luci/arcadia
 	arch = x86_64
@@ -12,7 +12,7 @@ pkgbase = arcadia-dreamshell
 	depends = webkit2gtk-4.1
 	depends = gtk3
 	options = !lto
-	source = arcadia-dreamshell-0.1.0.tar.gz::https://github.com/Evol-Luci/arcadia/archive/refs/tags/v0.1.0.tar.gz
-	sha256sums = dc6a927e395c5803570a7614b86f7cf46973b85fb28fc149c780b27b9b59a211
+	source = arcadia-dreamshell-0.1.1.tar.gz::https://github.com/Evol-Luci/arcadia/archive/refs/tags/v0.1.1.tar.gz
+	sha256sums = SKIP
 
 pkgname = arcadia-dreamshell
