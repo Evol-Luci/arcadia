@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>org.arcadia.dreamshell</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <name>Arcadia</name>
+  <summary>Linux-native emulation ecosystem</summary>
+  <developer id="org.arcadia">
+    <name>Arcadia Project</name>
+  </developer>
+  <description>
+    <p>
+      Arcadia is a Linux-first emulation management ecosystem. Dreamshell is its
+      interface; DreamVault is its engine.
+    </p>
+    <p>
+      It discovers and visualizes emulator state — letting you browse your library
+      and resume games straight into savestates — without reimplementing the
+      emulators themselves.
+    </p>
+  </description>
+  <launchable type="desktop-id">arcadia.desktop</launchable>
+  <categories>
+    <category>Game</category>
+  </categories>
+  <url type="homepage">https://github.com/Evol-Luci/arcadia</url>
+  <url type="bugtracker">https://github.com/Evol-Luci/arcadia/issues</url>
+  <content_rating type="oars-1.1" />
+  <releases>
+    <release version="0.1.0" date="2026-06-15" />
+  </releases>
+</component>

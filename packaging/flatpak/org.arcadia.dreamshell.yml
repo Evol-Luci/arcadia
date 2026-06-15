@@ -1,0 +1,64 @@
+# Flatpak manifest for Arcadia.
+#
+# IMPORTANT — this packages a PREBUILT binary (run `npm run release` or the
+# orchestrator first so target/release/arcadia exists). It does not compile from
+# source inside the sandbox.
+#
+# CAVEAT for Arcadia specifically: Flatpak runs the app sandboxed, but Arcadia's
+# job is to discover and launch *host-installed* emulators. A sandboxed process
+# cannot exec host binaries directly — it must go through `flatpak-spawn --host`
+# (granted below via --talk-name=org.freedesktop.Flatpak). Until the launcher
+# code detects the Flatpak sandbox and routes emulator launches through
+# flatpak-spawn, the Flatpak build will run but will NOT be able to start
+# emulators. See the notes in packaging/ for the code change required.
+app-id: org.arcadia.dreamshell
+runtime: org.gnome.Platform
+runtime-version: '49'
+sdk: org.gnome.Sdk
+command: arcadia
+finish-args:
+  - --share=ipc
+  - --share=network
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --socket=pulseaudio
+  - --device=all
+  - --filesystem=host
+  # lets Arcadia run host emulators via flatpak-spawn --host (code change needed)
+  - --talk-name=org.freedesktop.Flatpak
+modules:
+  - name: arcadia
+    buildsystem: simple
+    build-commands:
+      - install -Dm755 arcadia /app/bin/arcadia
+      - install -Dm644 arcadia.desktop
+        /app/share/applications/org.arcadia.dreamshell.desktop
+      - sed -i 's/^Icon=arcadia$/Icon=org.arcadia.dreamshell/'
+        /app/share/applications/org.arcadia.dreamshell.desktop
+      - install -Dm644 org.arcadia.dreamshell.metainfo.xml
+        /app/share/metainfo/org.arcadia.dreamshell.metainfo.xml
+      - sed -i 's|>arcadia.desktop<|>org.arcadia.dreamshell.desktop<|'
+        /app/share/metainfo/org.arcadia.dreamshell.metainfo.xml
+      - install -Dm644 32x32.png
+        /app/share/icons/hicolor/32x32/apps/org.arcadia.dreamshell.png
+      - install -Dm644 128x128.png
+        /app/share/icons/hicolor/128x128/apps/org.arcadia.dreamshell.png
+      - install -Dm644 128x128@2x.png
+        /app/share/icons/hicolor/256x256/apps/org.arcadia.dreamshell.png
+      - install -Dm644 icon.png
+        /app/share/icons/hicolor/512x512/apps/org.arcadia.dreamshell.png
+    sources:
+      - type: file
+        path: ../../target/release/arcadia
+      - type: file
+        path: ../arcadia.desktop
+      - type: file
+        path: ../org.arcadia.dreamshell.metainfo.xml
+      - type: file
+        path: ../../desktop/src-tauri/icons/32x32.png
+      - type: file
+        path: ../../desktop/src-tauri/icons/128x128.png
+      - type: file
+        path: ../../desktop/src-tauri/icons/128x128@2x.png
+      - type: file
+        path: ../../desktop/src-tauri/icons/icon.png

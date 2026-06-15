@@ -1,0 +1,28 @@
+[package]
+name = "dreamshell"
+description = "Dreamshell — the Arcadia interface (Tauri shell over the DreamVault engine)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[build-dependencies]
+tauri-build = { version = "1.5", features = [] }
+
+[dependencies]
+dreamvault = { path = "../../core/dreamvault" }
+tauri = { version = "1.6", features = ["dialog-open", "shell-open", "protocol-asset"] }
+# WebKitGTK's native Web Gamepad API is unreliable on Linux, so we read
+# controllers in-process via evdev and feed the webview ourselves.
+gilrs = "0.10"
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tracing-appender.workspace = true
+
+[features]
+# default Tauri custom-protocol feature for production builds
+custom-protocol = ["tauri/custom-protocol"]

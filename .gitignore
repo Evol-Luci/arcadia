@@ -1,0 +1,30 @@
+/target
+**/target
+node_modules
+dist
+.DS_Store
+*.log
+
+# Tauri
+desktop/src-tauri/gen
+
+# Local data / scratch
+*.db
+*.db-shm
+*.db-wal
+.env
+.env.local
+
+# solace-backup vault (internal versioning, not for distribution git)
+.solace_vault/
+
+# Packaging build artifacts
+packaging/**/pkg/
+packaging/**/src/
+packaging/**/*.pkg.tar.zst
+packaging/**/*.rpm
+packaging/.flatpak-builder/
+packaging/build/
+packaging/repo/
+packaging/*.flatpak
+*.AppImage

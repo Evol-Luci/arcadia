@@ -1,0 +1,143 @@
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Orbitron:wght@500;700;900&display=swap");
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ---- Theme Engine tokens ------------------------------------------------
+   Themes set CSS variables on <html class="theme-*">. The JSON theme
+   definitions in src/theme/themes.ts mirror these. DreamGlass is the default
+   (Heavy Y2K), Afterglow is CRT-heavy, Arcadia Green is classic-monitor. */
+
+:root {
+  --arc-primary: 0 215 255;
+  --arc-secondary: 255 77 210;
+  --arc-bg-from: 10 14 28;
+  --arc-bg-to: 4 6 14;
+  --arc-surface: 18 24 44;
+  --arc-surface-2: 26 33 58;
+  --arc-ink: 235 240 255;
+  --arc-ink-dim: 150 162 196;
+  --arc-glass-opacity: 0.6;
+  --arc-scanlines: 1;
+  --arc-crt-glow: 1;
+}
+
+.theme-dreamglass {
+  --arc-primary: 0 215 255;
+  --arc-secondary: 255 77 210;
+  --arc-bg-from: 12 18 38;
+  --arc-bg-to: 4 6 14;
+  --arc-surface: 18 24 44;
+  --arc-surface-2: 28 36 64;
+  --arc-ink: 235 240 255;
+  --arc-ink-dim: 150 162 196;
+}
+
+.theme-afterglow {
+  --arc-primary: 255 138 76;
+  --arc-secondary: 120 90 255;
+  --arc-bg-from: 22 10 24;
+  --arc-bg-to: 6 3 8;
+  --arc-surface: 30 16 30;
+  --arc-surface-2: 44 24 44;
+  --arc-ink: 255 238 224;
+  --arc-ink-dim: 196 160 150;
+}
+
+.theme-arcadia-green {
+  --arc-primary: 64 255 148;
+  --arc-secondary: 32 200 120;
+  --arc-bg-from: 4 16 10;
+  --arc-bg-to: 2 8 5;
+  --arc-surface: 8 26 16;
+  --arc-surface-2: 12 40 24;
+  --arc-ink: 200 255 220;
+  --arc-ink-dim: 110 170 130;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  font-family: theme("fontFamily.sans");
+  color: rgb(var(--arc-ink));
+  background:
+    radial-gradient(
+      120% 80% at 50% 0%,
+      rgb(var(--arc-primary) / 0.08),
+      transparent 60%
+    ),
+    linear-gradient(180deg, rgb(var(--arc-bg-from)), rgb(var(--arc-bg-to)));
+  background-attachment: fixed;
+  overflow: hidden;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* Frosted glass panel — the core DreamGlass surface. */
+.glass {
+  background: rgb(var(--arc-surface) / var(--arc-glass-opacity));
+  backdrop-filter: blur(18px) saturate(140%);
+  -webkit-backdrop-filter: blur(18px) saturate(140%);
+  border: 1px solid rgb(var(--arc-primary) / 0.18);
+}
+
+/* Optional CRT scanline overlay, toggled by the theme. */
+.crt-scanlines::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: repeating-linear-gradient(
+    to bottom,
+    rgb(0 0 0 / 0.16) 0px,
+    rgb(0 0 0 / 0.16) 1px,
+    transparent 2px,
+    transparent 3px
+  );
+  mix-blend-mode: multiply;
+  opacity: calc(var(--arc-scanlines) * 0.5);
+}
+
+.text-glow {
+  text-shadow: 0 0 18px rgb(var(--arc-primary) / calc(var(--arc-crt-glow) * 0.6));
+}
+
+/* Focus ring for controller / keyboard navigation. Every focusable tile uses
+   this so the active element is always obvious on a couch + controller. */
+.focusable {
+  outline: none;
+  transition:
+    transform 0.12s ease,
+    box-shadow 0.12s ease,
+    border-color 0.12s ease;
+}
+.focusable[data-focused="true"] {
+  transform: translateY(-4px) scale(1.03);
+  border-color: rgb(var(--arc-primary));
+  box-shadow:
+    0 0 0 2px rgb(var(--arc-primary)),
+    0 0 28px rgb(var(--arc-primary) / 0.55);
+  z-index: 5;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: rgb(var(--arc-primary) / 0.4);
+  border-radius: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}

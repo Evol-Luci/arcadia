@@ -1,0 +1,41 @@
+[package]
+name = "dreamvault"
+description = "Arcadia engine: ROM index, emulator registry, metadata, saves, stats. The truth layer."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[lib]
+name = "dreamvault"
+path = "src/lib.rs"
+
+[dependencies]
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+sqlx.workspace = true
+chrono.workspace = true
+directories.workspace = true
+uuid.workspace = true
+walkdir.workspace = true
+async-trait.workspace = true
+reqwest.workspace = true
+zip.workspace = true
+tempfile.workspace = true
+# Pure-Rust WebAssembly interpreter for the community plugin sandbox. No WASI,
+# no host imports are linked, so plugins cannot touch the filesystem, network,
+# or syscalls — they are pure-data transforms, fuel-metered to bound CPU.
+wasmi = "0.31"
+sevenz-rust2 = { version = "0.21.0", default-features = false }
+
+[dev-dependencies]
+# Compile inline WAT to wasm for the plugin sandbox tests.
+wat = "1"
+# The `compress` feature (7z encoder) is needed only to build .7z fixtures in
+# tests; dev-dependency features don't reach the release binary, which keeps the
+# decode-only dependency above.
+sevenz-rust2 = { version = "0.21.0", default-features = false, features = ["compress"] }

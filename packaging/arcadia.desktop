@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Arcadia
+Comment=Linux-native emulation ecosystem.
+Exec=arcadia %U
+Icon=arcadia
+Terminal=false
+Categories=Game;
+Keywords=emulation;emulator;game;launcher;retro;dreamshell;dreamvault;
+StartupNotify=true
+StartupWMClass=Arcadia
