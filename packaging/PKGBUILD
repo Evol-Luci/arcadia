@@ -1,5 +1,6 @@
 # Maintainer: Arcadia Project <luci.evol.icul@gmail.com>
-pkgname=arcadia
+pkgname=arcadia-dreamshell
+_reponame=arcadia
 pkgver=0.1.0
 pkgrel=1
 pkgdesc="Linux-native emulation ecosystem (discovers and resumes emulator state)"
@@ -14,7 +15,7 @@ source=("$pkgname-$pkgver.tar.gz::https://github.com/Evol-Luci/arcadia/archive/r
 sha256sums=('dc6a927e395c5803570a7614b86f7cf46973b85fb28fc149c780b27b9b59a211')
 
 build() {
-  cd "$srcdir/$pkgname-$pkgver/desktop"
+  cd "$srcdir/$_reponame-$pkgver/desktop"
   npm ci
   # `-b none` builds the frontend + Rust binary and renames it to the product
   # name (arcadia), but skips Tauri's own deb/rpm/appimage bundling.
@@ -22,7 +23,7 @@ build() {
 }
 
 package() {
-  cd "$srcdir/$pkgname-$pkgver"
+  cd "$srcdir/$_reponame-$pkgver"
 
   install -Dm755 target/release/arcadia "$pkgdir/usr/bin/arcadia"
 
