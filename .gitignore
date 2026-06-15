@@ -27,4 +27,5 @@ packaging/.flatpak-builder/
 packaging/build/
 packaging/repo/
 packaging/*.flatpak
+packaging/*.tar.gz
 *.AppImage
