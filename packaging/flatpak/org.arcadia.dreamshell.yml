@@ -4,13 +4,13 @@
 # orchestrator first so target/release/arcadia exists). It does not compile from
 # source inside the sandbox.
 #
-# CAVEAT for Arcadia specifically: Flatpak runs the app sandboxed, but Arcadia's
-# job is to discover and launch *host-installed* emulators. A sandboxed process
-# cannot exec host binaries directly — it must go through `flatpak-spawn --host`
-# (granted below via --talk-name=org.freedesktop.Flatpak). Until the launcher
-# code detects the Flatpak sandbox and routes emulator launches through
-# flatpak-spawn, the Flatpak build will run but will NOT be able to start
-# emulators. See the notes in packaging/ for the code change required.
+# Arcadia's job is to discover and launch *host-installed* emulators, but a
+# sandboxed process cannot exec host binaries directly — it must go through
+# `flatpak-spawn --host` (granted below via --talk-name=org.freedesktop.Flatpak).
+# The launcher detects the Flatpak sandbox (core/dreamvault adapters/detect.rs:
+# in_flatpak_sandbox) and tunnels both emulator detection (which/pacman/flatpak)
+# and launch through flatpak-spawn --host, so the Flatpak build can scan and
+# start host emulators.
 app-id: org.arcadia.dreamshell
 runtime: org.gnome.Platform
 runtime-version: '49'
