@@ -24,6 +24,7 @@ use std::sync::Arc;
 
 pub use retroarch::RetroArchAdapter;
 pub use standalone::StandaloneAdapter;
+pub(crate) use standalone::xpadneo_controller_present;
 
 /// Static, declared capabilities of an adapter.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]

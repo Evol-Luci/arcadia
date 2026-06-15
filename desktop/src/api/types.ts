@@ -202,9 +202,18 @@ export interface ControllerProfile {
   bindings: Record<string, string>;
 }
 
+export type HidapiWorkaround = "auto" | "force" | "off";
+
 export interface ControllerConfig {
   profiles: ControllerProfile[];
   active_profile: string | null;
+  sdl_hidapi_workaround: HidapiWorkaround;
+}
+
+export interface HidapiStatus {
+  policy: HidapiWorkaround;
+  xpadneo_present: boolean;
+  effective: boolean;
 }
 
 export interface SyncConfig {

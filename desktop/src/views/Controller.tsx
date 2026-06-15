@@ -4,7 +4,7 @@ import { api } from "../api/commands";
 import { useStore } from "../store/useStore";
 import { Focusable } from "../components/Focusable";
 import { setGamepadCapture } from "../nav/spatialNav";
-import type { ControllerProfile } from "../api/types";
+import type { ControllerProfile, HidapiWorkaround } from "../api/types";
 
 // Standard-mapping button indices → readable names, for the live tester.
 const BUTTON_NAMES: Record<number, string> = {
@@ -140,8 +140,114 @@ export function Controller() {
         )}
       </section>
 
+      <CompatibilityPanel />
       <ProfilesPanel />
     </div>
+  );
+}
+
+// Controller compatibility: exposes the SDL-HIDAPI vs xpadneo workaround as a
+// user setting. A Bluetooth Xbox pad on the xpadneo driver is seen but delivers
+// no input to SDL-input emulators (PCSX2, DuckStation, RPCS3, Mupen64Plus);
+// forcing SDL's evdev backend fixes it. "Auto" applies it only when such a pad
+// is detected, so it stays out of the way of controllers that work fine.
+const HIDAPI_OPTIONS: { value: HidapiWorkaround; label: string; help: string }[] = [
+  {
+    value: "auto",
+    label: "Automatic",
+    help: "Apply the fix only when a controller that needs it is connected. Recommended.",
+  },
+  {
+    value: "force",
+    label: "Always on",
+    help: "Always force SDL's evdev input backend for these emulators.",
+  },
+  {
+    value: "off",
+    label: "Off",
+    help: "Never change SDL input behaviour.",
+  },
+];
+
+function CompatibilityPanel() {
+  const qc = useQueryClient();
+  const setToast = useStore((s) => s.setToast);
+
+  const status = useQuery({
+    queryKey: ["hidapi-status"],
+    queryFn: () => api.hidapiStatus(),
+  });
+
+  const setPolicy = useMutation({
+    mutationFn: (p: HidapiWorkaround) => api.setHidapiWorkaround(p),
+    onSuccess: () => {
+      setToast("Controller compatibility updated.");
+      qc.invalidateQueries({ queryKey: ["hidapi-status"] });
+      qc.invalidateQueries({ queryKey: ["controller-config"] });
+    },
+    onError: (e: unknown) => setToast(`Couldn't update: ${String(e)}`),
+  });
+
+  const policy = status.data?.policy ?? "auto";
+  const effective = status.data?.effective ?? false;
+  const detected = status.data?.xpadneo_present ?? false;
+
+  return (
+    <section className="mb-6">
+      <h2 className="font-display text-lg font-bold">Compatibility</h2>
+      <p className="mb-3 text-xs text-ink-dim">
+        Some Bluetooth Xbox controllers are detected by emulators but send no
+        input until SDL falls back to its evdev backend. This applies that fix
+        when launching SDL-input emulators (PCSX2, DuckStation, RPCS3,
+        Mupen64Plus).
+      </p>
+
+      <div className="glass max-w-sm rounded-2xl p-3">
+        <div className="mb-2 flex flex-col gap-2">
+          {HIDAPI_OPTIONS.map((opt) => {
+            const selected = policy === opt.value;
+            return (
+              <Focusable
+                key={opt.value}
+                onActivate={() => !selected && setPolicy.mutate(opt.value)}
+                ariaLabel={`Set controller compatibility to ${opt.label}`}
+                className={`rounded-lg px-3 py-2 text-left ${
+                  selected ? "bg-primary/15 ring-1 ring-primary/50" : ""
+                }`}
+              >
+                <div className="flex items-center gap-2">
+                  <span
+                    className={`h-2.5 w-2.5 shrink-0 rounded-full ${
+                      selected ? "bg-primary" : "bg-ink-dim/40"
+                    }`}
+                  />
+                  <span className="text-sm font-semibold">{opt.label}</span>
+                </div>
+                <p className="mt-0.5 pl-[18px] text-[11px] leading-snug text-ink-dim">
+                  {opt.help}
+                </p>
+              </Focusable>
+            );
+          })}
+        </div>
+
+        <div className="mt-1 border-t border-ink-dim/10 pt-2 text-[11px] text-ink-dim">
+          {detected ? (
+            <span>
+              A controller needing this fix is{" "}
+              <span className="font-semibold text-ink">connected</span>.
+            </span>
+          ) : (
+            <span>No controller needing this fix is currently detected.</span>
+          )}{" "}
+          {effective ? (
+            <span className="font-semibold text-primary">Fix active.</span>
+          ) : (
+            <span>Fix not being applied.</span>
+          )}
+        </div>
+      </div>
+    </section>
   );
 }
 
