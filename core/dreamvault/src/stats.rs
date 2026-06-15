@@ -148,11 +148,11 @@ impl Engine {
         };
 
         // A zipped game on an emulator that can't read archives is transparently
-        // extracted to a temp dir first; the guard is kept alive until the
-        // emulator exits (moved into the wait task below) and deleted then, so
-        // the user never has to unzip permanently. Extraction is blocking I/O,
-        // so it runs off the async runtime. On failure we fall through to the
-        // raw `.zip` — no regression versus before.
+        // extracted to a stable per-archive dir under the cache first (reused on
+        // later launches, so the disc keeps the same absolute path — an emulator
+        // savestate embeds that path and must be able to reopen it). Extraction
+        // is blocking I/O, so it runs off the async runtime. On failure we fall
+        // through to the raw `.zip` — no regression versus before.
         let needs_extract = rom_is_archive(&launch_rom) && !adapter.handles_archives();
         let extracted = if needs_extract {
             let zip_path = launch_rom.clone();
@@ -253,9 +253,9 @@ impl Engine {
         let start_instant = Utc::now();
         let mut child = handle.child;
         tokio::spawn(async move {
-            // Hold the extracted-ROM guard until the emulator exits; dropping it
-            // here removes the temp dir.
-            let _extracted = extracted;
+            // The extraction now persists across launches (stable per-archive
+            // dir), so there's no temp dir to clean up — just drop the handle.
+            drop(extracted);
             let status = child.wait().await;
             // Measure in seconds, then round to the nearest minute — but any
             // session that actually ran counts as at least 1 minute, so a brief

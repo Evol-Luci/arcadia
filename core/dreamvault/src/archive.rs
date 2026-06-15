@@ -103,35 +103,67 @@ fn le_u32(b: &[u8], at: usize) -> Option<u32> {
     Some(u32::from_le_bytes(b.get(at..at + 4)?.try_into().ok()?))
 }
 
-/// A zipped game extracted to a temporary directory so an emulator that can't
-/// read archives natively can boot it. The temp dir is deleted when this guard
-/// is dropped, so callers keep it alive for as long as the emulator runs.
+/// A zipped game extracted to a directory so an emulator that can't read
+/// archives natively can boot it. The directory is *stable per archive* and
+/// persists across launches (see [`extract_for_launch`]): an emulator savestate
+/// embeds the absolute path of the disc image it was made from, so that path has
+/// to resolve the next time the game is launched. A random per-launch temp dir
+/// (the old behaviour) broke launch-into-state for archived discs — DuckStation
+/// would report "Failed to open CD image from save state".
 pub struct ExtractedRom {
-    /// Held only for its `Drop`, which recursively removes the temp dir.
-    _dir: tempfile::TempDir,
-    /// The entry the emulator should boot (an absolute path inside the temp dir).
+    /// The entry the emulator should boot (an absolute path inside the extraction
+    /// dir). Stable across launches for a given archive.
     pub path: PathBuf,
 }
 
-/// Create the per-launch extraction dir under `~/.cache/arcadia/` (falling back
-/// to the system temp dir if `$HOME` is unset).
+/// Root under which per-archive extraction dirs live. Honours `XDG_CACHE_HOME`
+/// (so it's overridable, and tests can point it at a temp dir), else
+/// `~/.cache/arcadia`, else the system temp dir if `$HOME` is unset too.
 ///
 /// Why not the system `/tmp`: most of our emulators are Flatpaks, and a Flatpak
 /// sandbox gets a *private* `/tmp` — it can't see the host's `/tmp/arcadia-rom-*`,
 /// so the emulator fails with "Failed to open … for reading". Every Flatpak we
 /// ship grants `home`/`host` filesystem access, so an absolute path under
 /// `$HOME` is readable from inside the sandbox. `~/.cache` is the natural spot
-/// for transient, regenerable files.
-fn launch_extract_dir() -> std::io::Result<tempfile::TempDir> {
-    let builder = || tempfile::Builder::new().prefix("arcadia-rom-").to_owned();
-    match std::env::var_os("HOME") {
-        Some(home) => {
-            let base = PathBuf::from(home).join(".cache/arcadia");
-            std::fs::create_dir_all(&base)?;
-            builder().tempdir_in(base)
-        }
-        None => builder().tempdir(),
+/// for regenerable files.
+fn extract_base_dir() -> PathBuf {
+    if let Some(xdg) = std::env::var_os("XDG_CACHE_HOME") {
+        return PathBuf::from(xdg).join("arcadia");
     }
+    match std::env::var_os("HOME") {
+        Some(home) => PathBuf::from(home).join(".cache/arcadia"),
+        None => std::env::temp_dir().join("arcadia"),
+    }
+}
+
+/// A stable directory name for an archive's extraction, `arcadia-rom-<hash>`,
+/// where the hash is an FNV-1a digest of the archive's canonical absolute path.
+/// Deterministic across launches and app restarts so the extracted disc keeps
+/// the same absolute path — what makes an emulator's path-embedding savestate
+/// reload correctly.
+fn stable_dir_name(archive_path: &Path) -> String {
+    let abs = std::fs::canonicalize(archive_path).unwrap_or_else(|_| archive_path.to_path_buf());
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325; // FNV-1a offset basis
+    for b in abs.as_os_str().as_encoded_bytes() {
+        hash ^= *b as u64;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3); // FNV prime
+    }
+    format!("arcadia-rom-{hash:016x}")
+}
+
+/// If a previous extraction of this archive is still on disk, return the entry
+/// the emulator should boot — so we reuse it instead of re-extracting (and,
+/// crucially, keep the same absolute path a savestate may reference).
+fn existing_launch_target(dir: &Path) -> Option<PathBuf> {
+    let mut files: Vec<(PathBuf, u64)> = Vec::new();
+    for entry in std::fs::read_dir(dir).ok()? {
+        let entry = entry.ok()?;
+        let meta = entry.metadata().ok()?;
+        if meta.is_file() {
+            files.push((entry.path(), meta.len()));
+        }
+    }
+    pick_launch_target(&files)
 }
 
 /// Extract a compressed game to a fresh temp dir and pick the entry to boot.
@@ -146,10 +178,26 @@ fn launch_extract_dir() -> std::io::Result<tempfile::TempDir> {
 /// file entries; the caller then falls back to handing the emulator the original
 /// archive.
 pub fn extract_for_launch(archive_path: &Path) -> Option<ExtractedRom> {
+    extract_for_launch_in(archive_path, &extract_base_dir())
+}
+
+/// [`extract_for_launch`] against an explicit base root. The extraction dir is
+/// `<base>/arcadia-rom-<hash>`, stable per archive; if it already holds a
+/// bootable entry from a prior launch we reuse it (no re-extraction), keeping the
+/// disc image's absolute path identical so savestates that embed it still load.
+pub(crate) fn extract_for_launch_in(archive_path: &Path, base: &Path) -> Option<ExtractedRom> {
+    let dir = base.join(stable_dir_name(archive_path));
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        tracing::warn!(dir = %dir.display(), error = %e, "extract: can't create extraction dir");
+        return None;
+    }
+    if let Some(path) = existing_launch_target(&dir) {
+        return Some(ExtractedRom { path });
+    }
     if has_ext(archive_path, "7z") {
-        extract_7z_for_launch(archive_path)
+        extract_7z_for_launch(archive_path, &dir)
     } else {
-        extract_zip_for_launch(archive_path)
+        extract_zip_for_launch(archive_path, &dir)
     }
 }
 
@@ -157,7 +205,7 @@ pub fn extract_for_launch(archive_path: &Path) -> Option<ExtractedRom> {
 ///
 /// Decompression is the only place we pull in the `zip` crate; everywhere else
 /// this module stays a tiny reader.
-fn extract_zip_for_launch(zip_path: &Path) -> Option<ExtractedRom> {
+fn extract_zip_for_launch(zip_path: &Path, dir: &Path) -> Option<ExtractedRom> {
     // Failures here are silently retried as "hand the emulator the raw archive",
     // which then can't boot — indistinguishable from "the game won't load". So we
     // log each failure point with its cause; the most common real-world one is
@@ -174,13 +222,6 @@ fn extract_zip_for_launch(zip_path: &Path) -> Option<ExtractedRom> {
         Ok(a) => a,
         Err(e) => {
             tracing::warn!(archive = %zip_path.display(), error = %e, "extract: not a readable zip");
-            return None;
-        }
-    };
-    let dir = match launch_extract_dir() {
-        Ok(d) => d,
-        Err(e) => {
-            tracing::warn!(error = %e, "extract: can't create temp dir");
             return None;
         }
     };
@@ -204,7 +245,7 @@ fn extract_zip_for_launch(zip_path: &Path) -> Option<ExtractedRom> {
             Some(b) => PathBuf::from(b),
             None => continue,
         };
-        let out_path = dir.path().join(&base);
+        let out_path = dir.join(&base);
         let mut out = match std::fs::File::create(&out_path) {
             Ok(f) => f,
             Err(e) => {
@@ -224,7 +265,7 @@ fn extract_zip_for_launch(zip_path: &Path) -> Option<ExtractedRom> {
     }
 
     let path = pick_launch_target(&extracted)?;
-    Some(ExtractedRom { _dir: dir, path })
+    Some(ExtractedRom { path })
 }
 
 /// Extract a `.7z` game. See [`extract_for_launch`] for the shared contract.
@@ -233,7 +274,7 @@ fn extract_zip_for_launch(zip_path: &Path) -> Option<ExtractedRom> {
 /// `.7z`-compressed disc image for an emulator (PCSX2, …) that can only boot a
 /// raw ISO/CUE. We let `sevenz_rust2` decode each entry and write it out with the
 /// same flatten-and-pick rules as the ZIP path.
-fn extract_7z_for_launch(sevenz_path: &Path) -> Option<ExtractedRom> {
+fn extract_7z_for_launch(sevenz_path: &Path, dir: &Path) -> Option<ExtractedRom> {
     let mut archive = match sevenz_rust2::ArchiveReader::open(
         sevenz_path,
         sevenz_rust2::Password::empty(),
@@ -244,15 +285,8 @@ fn extract_7z_for_launch(sevenz_path: &Path) -> Option<ExtractedRom> {
             return None;
         }
     };
-    let dir = match launch_extract_dir() {
-        Ok(d) => d,
-        Err(e) => {
-            tracing::warn!(error = %e, "extract: can't create temp dir");
-            return None;
-        }
-    };
 
-    let dir_path = dir.path().to_path_buf();
+    let dir_path = dir.to_path_buf();
     let mut extracted: Vec<(PathBuf, u64)> = Vec::new();
     let mut write_error: Option<String> = None;
     // `for_each_entries` streams each entry's decompressed bytes; we flatten the
@@ -299,7 +333,7 @@ fn extract_7z_for_launch(sevenz_path: &Path) -> Option<ExtractedRom> {
     }
 
     let path = pick_launch_target(&extracted)?;
-    Some(ExtractedRom { _dir: dir, path })
+    Some(ExtractedRom { path })
 }
 
 /// Choose which extracted file to hand the emulator. A disc sheet/playlist
@@ -454,41 +488,49 @@ mod tests {
 
     #[test]
     fn extracts_deflated_single_rom() {
+        let base = tempfile::tempdir().unwrap();
         // Highly compressible payload so DEFLATE actually engages.
         let payload = vec![0x42u8; 8000];
         let f = build_zip(&[("Sonic the Hedgehog.md", payload.clone(), true)]);
-        let ex = extract_for_launch(f.path()).expect("extracted");
+        let ex = extract_for_launch_in(f.path(), base.path()).expect("extracted");
         assert!(ex.path.to_string_lossy().ends_with("Sonic the Hedgehog.md"));
         assert_eq!(std::fs::read(&ex.path).unwrap(), payload);
     }
 
     #[test]
     fn picks_cue_sheet_and_keeps_bin_alongside() {
+        let base = tempfile::tempdir().unwrap();
         // The .bin is larger, but the .cue is what the emulator must boot.
         let f = build_zip(&[
             ("game.bin", vec![0u8; 9000], false),
             ("game.cue", b"FILE \"game.bin\" BINARY".to_vec(), false),
         ]);
-        let ex = extract_for_launch(f.path()).expect("extracted");
+        let ex = extract_for_launch_in(f.path(), base.path()).expect("extracted");
         assert!(ex.path.to_string_lossy().ends_with("game.cue"));
         assert!(ex.path.parent().unwrap().join("game.bin").exists());
     }
 
     #[test]
-    fn temp_dir_is_removed_when_guard_drops() {
+    fn extraction_persists_and_reuses_same_path() {
+        // The disc path must be stable across launches so an emulator savestate
+        // that embeds it still resolves — i.e. the dir survives drop and a second
+        // call returns the identical path without re-extracting.
+        let base = tempfile::tempdir().unwrap();
         let f = build_zip(&[("rom.gba", vec![1u8; 1000], true)]);
-        let ex = extract_for_launch(f.path()).expect("extracted");
-        let dir = ex.path.parent().unwrap().to_path_buf();
-        assert!(dir.exists());
-        drop(ex);
-        assert!(!dir.exists(), "temp dir should be cleaned up on drop");
+        let first = extract_for_launch_in(f.path(), base.path()).expect("extracted");
+        let path = first.path.clone();
+        drop(first);
+        assert!(path.exists(), "extraction must persist after the guard drops");
+        let second = extract_for_launch_in(f.path(), base.path()).expect("reused");
+        assert_eq!(second.path, path, "second launch must reuse the same path");
     }
 
     #[test]
     fn nested_paths_are_flattened_not_escaped() {
-        // A crafted traversal name must not write outside the temp dir.
+        let base = tempfile::tempdir().unwrap();
+        // A crafted traversal name must not write outside the extraction dir.
         let f = build_zip(&[("../../etc/evil.sfc", vec![7u8; 500], false)]);
-        let ex = extract_for_launch(f.path()).expect("extracted");
+        let ex = extract_for_launch_in(f.path(), base.path()).expect("extracted");
         assert_eq!(ex.path.file_name().unwrap(), "evil.sfc");
         // The traversal prefix was stripped — no `etc` component survives.
         assert!(!ex.path.components().any(|c| c.as_os_str() == "etc"));
@@ -511,41 +553,46 @@ mod tests {
 
     #[test]
     fn extracts_compressed_7z_single_rom() {
+        let base = tempfile::tempdir().unwrap();
         // Highly compressible payload so the codec actually engages.
         let payload = vec![0x42u8; 8000];
         let f = build_7z(&[("Jak and Daxter [SCUS-97124].iso", payload.clone())]);
-        let ex = extract_for_launch(f.path()).expect("extracted");
+        let ex = extract_for_launch_in(f.path(), base.path()).expect("extracted");
         assert!(ex.path.to_string_lossy().ends_with("Jak and Daxter [SCUS-97124].iso"));
         assert_eq!(std::fs::read(&ex.path).unwrap(), payload);
     }
 
     #[test]
     fn sevenz_picks_cue_sheet_and_keeps_bin_alongside() {
+        let base = tempfile::tempdir().unwrap();
         let f = build_7z(&[
             ("game.bin", vec![0u8; 9000]),
             ("game.cue", b"FILE \"game.bin\" BINARY".to_vec()),
         ]);
-        let ex = extract_for_launch(f.path()).expect("extracted");
+        let ex = extract_for_launch_in(f.path(), base.path()).expect("extracted");
         assert!(ex.path.to_string_lossy().ends_with("game.cue"));
         assert!(ex.path.parent().unwrap().join("game.bin").exists());
     }
 
     #[test]
-    fn sevenz_temp_dir_is_removed_when_guard_drops() {
+    fn sevenz_extraction_persists_and_reuses_same_path() {
+        let base = tempfile::tempdir().unwrap();
         let f = build_7z(&[("rom.iso", vec![1u8; 4000])]);
-        let ex = extract_for_launch(f.path()).expect("extracted");
-        let dir = ex.path.parent().unwrap().to_path_buf();
-        assert!(dir.exists());
-        drop(ex);
-        assert!(!dir.exists(), "temp dir should be cleaned up on drop");
+        let first = extract_for_launch_in(f.path(), base.path()).expect("extracted");
+        let path = first.path.clone();
+        drop(first);
+        assert!(path.exists(), "extraction must persist after the guard drops");
+        let second = extract_for_launch_in(f.path(), base.path()).expect("reused");
+        assert_eq!(second.path, path, "second launch must reuse the same path");
     }
 
     #[test]
     fn sevenz_non_archive_returns_none_for_launch() {
+        let base = tempfile::tempdir().unwrap();
         let f = write_temp(b"definitely not a 7z");
         // A `.7z` suffix routes to the 7z path; a corrupt file must not panic.
         let named = tempfile::Builder::new().suffix(".7z").tempfile().unwrap();
         std::fs::copy(f.path(), named.path()).unwrap();
-        assert!(extract_for_launch(named.path()).is_none());
+        assert!(extract_for_launch_in(named.path(), base.path()).is_none());
     }
 }
