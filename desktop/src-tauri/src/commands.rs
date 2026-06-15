@@ -5,9 +5,10 @@
 use dreamvault::achievements::{RaGameCandidate, RaGameProgress, RaUserSummary};
 use dreamvault::adapters::AdapterDescriptor;
 use dreamvault::config::{
-    ControllerConfig, ControllerProfile, RetroAchievementsCredentials, ScreenScraperCredentials,
-    SyncConfig,
+    ControllerConfig, ControllerProfile, HidapiWorkaround, RetroAchievementsCredentials,
+    ScreenScraperCredentials, SyncConfig,
 };
+use dreamvault::controller::HidapiStatus;
 use dreamvault::library::{GameQuery, ScanReport};
 use dreamvault::models::{
     Achievement, Collection, CollectionSummary, Emulator, Game, GameDisc, GameSettings,
@@ -555,6 +556,19 @@ pub fn set_active_controller_profile(
     id: Option<String>,
 ) -> CmdResult<()> {
     map(state.engine.set_active_controller_profile(id.as_deref()))
+}
+
+#[tauri::command]
+pub fn hidapi_status(state: State<'_, AppState>) -> HidapiStatus {
+    state.engine.hidapi_status()
+}
+
+#[tauri::command]
+pub fn set_hidapi_workaround(
+    state: State<'_, AppState>,
+    policy: HidapiWorkaround,
+) -> CmdResult<()> {
+    map(state.engine.set_hidapi_workaround(policy))
 }
 
 // ---- Cloud Sync -----------------------------------------------------------

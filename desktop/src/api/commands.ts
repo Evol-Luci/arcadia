@@ -13,6 +13,8 @@ import type {
   GameDisc,
   GameQuery,
   GameSettings,
+  HidapiStatus,
+  HidapiWorkaround,
   LaunchResult,
   LibraryStats,
   PlatformEmulators,
@@ -146,6 +148,9 @@ export const api = {
     invoke<void>("delete_controller_profile", { id }),
   setActiveControllerProfile: (id: string | null) =>
     invoke<void>("set_active_controller_profile", { id }),
+  hidapiStatus: () => invoke<HidapiStatus>("hidapi_status"),
+  setHidapiWorkaround: (policy: HidapiWorkaround) =>
+    invoke<void>("set_hidapi_workaround", { policy }),
 
   // Cloud Sync
   syncConfig: () => invoke<SyncConfig>("sync_config"),

@@ -28,13 +28,46 @@
 //! default so it never disturbs other controllers — and uses the same
 //! `LaunchContext.env` channel the full controller bridge will build on.
 
-use crate::config::{AppConfig, ControllerConfig, ControllerProfile};
+use crate::config::{AppConfig, ControllerConfig, ControllerProfile, HidapiWorkaround};
 use crate::error::{EngineError, Result};
 use crate::{new_id, Engine};
+use serde::Serialize;
+
+/// Live state of the SDL-HIDAPI vs xpadneo workaround, for the Controller UI.
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct HidapiStatus {
+    /// The user's configured policy.
+    pub policy: HidapiWorkaround,
+    /// Whether an xpadneo-bound controller is connected right now.
+    pub xpadneo_present: bool,
+    /// Whether the workaround would actually be applied to an SDL-input emulator
+    /// launched at this moment, given the policy and detection.
+    pub effective: bool,
+}
 
 impl Engine {
     pub fn controller_config(&self) -> ControllerConfig {
         self.load_config().controller
+    }
+
+    /// Set the policy for the SDL-HIDAPI vs xpadneo launch workaround.
+    pub fn set_hidapi_workaround(&self, policy: HidapiWorkaround) -> Result<()> {
+        let mut cfg: AppConfig = self.load_config();
+        cfg.controller.sdl_hidapi_workaround = policy;
+        self.save_config(&cfg)
+    }
+
+    /// Report the workaround's current policy and whether it would fire now, so
+    /// the UI can show "Auto — active" vs "Auto — idle" honestly.
+    pub fn hidapi_status(&self) -> HidapiStatus {
+        let policy = self.load_config().controller.sdl_hidapi_workaround;
+        let xpadneo_present = crate::adapters::xpadneo_controller_present();
+        let effective = match policy {
+            HidapiWorkaround::Off => false,
+            HidapiWorkaround::Force => true,
+            HidapiWorkaround::Auto => xpadneo_present,
+        };
+        HidapiStatus { policy, xpadneo_present, effective }
     }
 
     /// Create or update a mapping profile. A blank `id` mints a new one and

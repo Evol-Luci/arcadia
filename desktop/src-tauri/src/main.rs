@@ -139,6 +139,8 @@ fn main() {
             commands::save_controller_profile,
             commands::delete_controller_profile,
             commands::set_active_controller_profile,
+            commands::hidapi_status,
+            commands::set_hidapi_workaround,
             commands::sync_config,
             commands::set_sync_config,
             commands::sync_status,

@@ -103,7 +103,7 @@ fn xdg_base(flatpak_app_id: Option<&str>, config: bool) -> Option<PathBuf> {
 /// `uevent`, `module`, …) never contain a colon, so that's the discriminator.
 /// Absent sysfs (non-Linux, sandbox) reads as "not present" and the workaround
 /// stays off.
-fn xpadneo_controller_present() -> bool {
+pub(crate) fn xpadneo_controller_present() -> bool {
     const DRIVER_DIRS: &[&str] = &[
         "/sys/bus/hid/drivers/xpadneo",
         "/sys/bus/hid/drivers/hid-xpadneo",
@@ -897,8 +897,12 @@ impl StandaloneAdapter {
     ///
     /// A Bluetooth Xbox pad driven by the xpadneo kernel driver is enumerated by
     /// SDL's HIDAPI joystick driver, which reports the right button/axis counts
-    /// but delivers *zero* input through it. Forcing SDL to its evdev joystick
-    /// backend (`SDL_JOYSTICK_HIDAPI=0`) restores a full event stream. Other
+    /// but delivers *zero* input through it. Disabling HIDAPI alone is not enough:
+    /// SDL's evdev backend also reports zero events for this pad. The combination
+    /// that restores a full event stream — verified through both the SDL Joystick
+    /// and GameController APIs (the latter is what these emulators bind to) — is
+    /// HIDAPI off *plus* SDL's classic `/dev/input/jsN` backend
+    /// (`SDL_JOYSTICK_HIDAPI=0` and `SDL_JOYSTICK_LINUX_CLASSIC=1`). Other
     /// controllers are usually fine on HIDAPI — some need it — so this only
     /// applies to SDL-input emulators, never overrides a value the caller already
     /// put in `ctx.env` (a per-game setting wins), and under the default `Auto`
@@ -906,8 +910,18 @@ impl StandaloneAdapter {
     /// See `Design_Discussions_00.md` → "Troubleshooting Log: Xbox … Mupen64Plus".
     fn apply_sdl_hidapi_workaround(&self, ctx: &LaunchContext, cmd: &mut tokio::process::Command) {
         use crate::config::HidapiWorkaround;
-        const SDL_INPUT_IDS: &[&str] = &["mupen64plus"];
-        if !SDL_INPUT_IDS.contains(&self.spec.id)
+        // Every standalone emulator we drive reads controllers through SDL's
+        // joystick subsystem and so hits the SDL-HIDAPI vs xpadneo conflict — the
+        // sole exception is Dolphin, which on Linux uses its own native evdev
+        // input backend (configured separately) and never touches SDL joystick
+        // input. A denylist is therefore both correct and future-proof: emulators
+        // that genuinely use SDL get the fix, new SDL emulators are covered
+        // automatically, and anything that doesn't use SDL simply ignores these
+        // env vars (a harmless no-op). Combined with the `Auto` gate below — which
+        // only fires when the offending pad is actually present — broad application
+        // never perturbs other controllers or setups.
+        const NON_SDL_INPUT_IDS: &[&str] = &["dolphin"];
+        if NON_SDL_INPUT_IDS.contains(&self.spec.id)
             || ctx.env.iter().any(|(k, _)| k == "SDL_JOYSTICK_HIDAPI")
         {
             return;
@@ -919,6 +933,7 @@ impl StandaloneAdapter {
         };
         if apply {
             cmd.env("SDL_JOYSTICK_HIDAPI", "0");
+            cmd.env("SDL_JOYSTICK_LINUX_CLASSIC", "1");
         }
     }
 
@@ -1283,13 +1298,22 @@ mod tests {
     /// Did `apply_sdl_hidapi_workaround` set `SDL_JOYSTICK_HIDAPI=0` on the
     /// command for this adapter under the given policy?
     fn sets_hidapi(adapter: &StandaloneAdapter, policy: crate::config::HidapiWorkaround) -> bool {
+        env_set_to(adapter, policy, "SDL_JOYSTICK_HIDAPI", "0")
+    }
+
+    fn env_set_to(
+        adapter: &StandaloneAdapter,
+        policy: crate::config::HidapiWorkaround,
+        key: &str,
+        val: &str,
+    ) -> bool {
         let mut ctx = ctx_with_state("/save/x.st3");
         ctx.sdl_hidapi_workaround = policy;
         let mut cmd = tokio::process::Command::new("emu");
         adapter.apply_sdl_hidapi_workaround(&ctx, &mut cmd);
         cmd.as_std()
             .get_envs()
-            .any(|(k, v)| k == "SDL_JOYSTICK_HIDAPI" && v == Some("0".as_ref()))
+            .any(|(k, v)| k == key && v == Some(val.as_ref()))
     }
 
     #[test]
@@ -1299,9 +1323,39 @@ mod tests {
         // Force always sets it; Off never does — regardless of hardware.
         assert!(sets_hidapi(&sdl, HidapiWorkaround::Force));
         assert!(!sets_hidapi(&sdl, HidapiWorkaround::Off));
-        // Non-SDL-input emulators are never touched, even when forced.
+        // All SDL-input standalones are covered (regression guard: the set used
+        // to be a 4-emulator allowlist, leaving Bluetooth pads dead everywhere
+        // else; it is now a denylist so every SDL emulator is fixed and new ones
+        // are covered automatically). Spot-check a spread across systems.
+        for a in [
+            StandaloneAdapter::duckstation(),
+            StandaloneAdapter::pcsx2(),
+            StandaloneAdapter::rpcs3(),
+            StandaloneAdapter::ppsspp(),
+            StandaloneAdapter::melonds(),
+            StandaloneAdapter::flycast(),
+            StandaloneAdapter::snes9x(),
+            StandaloneAdapter::mgba(),
+            StandaloneAdapter::mednafen(),
+            StandaloneAdapter::mesen(),
+            StandaloneAdapter::xemu(),
+            StandaloneAdapter::cemu(),
+            StandaloneAdapter::vita3k(),
+            StandaloneAdapter::ryujinx(),
+            StandaloneAdapter::lime3ds(),
+            StandaloneAdapter::mame(),
+        ] {
+            assert!(sets_hidapi(&a, HidapiWorkaround::Force));
+        }
+        // Dolphin is the lone exception (native evdev backend) — never touched,
+        // even when forced.
         let non_sdl = StandaloneAdapter::dolphin();
         assert!(!sets_hidapi(&non_sdl, HidapiWorkaround::Force));
+        // The fix is two-part: disabling HIDAPI alone leaves this pad dead on
+        // SDL's evdev backend, so the classic `/dev/input/jsN` backend must be
+        // enabled too (regression guard for the GameController-API event drop).
+        assert!(env_set_to(&sdl, HidapiWorkaround::Force, "SDL_JOYSTICK_LINUX_CLASSIC", "1"));
+        assert!(!env_set_to(&sdl, HidapiWorkaround::Off, "SDL_JOYSTICK_LINUX_CLASSIC", "1"));
     }
 
     #[test]
