@@ -11,7 +11,7 @@ makedepends=('rust' 'cargo' 'npm' 'nodejs')
 options=('!lto')
 source=("$pkgname-$pkgver.tar.gz::https://github.com/Evol-Luci/arcadia/archive/refs/tags/v$pkgver.tar.gz")
 # Replace with the real digest after the release is published: updpkgsums
-sha256sums=('SKIP')
+sha256sums=('dc6a927e395c5803570a7614b86f7cf46973b85fb28fc149c780b27b9b59a211')
 
 build() {
   cd "$srcdir/$pkgname-$pkgver/desktop"
