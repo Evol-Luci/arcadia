@@ -54,8 +54,12 @@ export function Settings({ profileId }: { profileId: string }) {
       return null;
     },
     onSuccess: (r) => {
-      if (r) qc.invalidateQueries({ queryKey: ["sources", profileId] });
+      if (r) {
+        setToast("ROM folder added.");
+        qc.invalidateQueries({ queryKey: ["sources", profileId] });
+      }
     },
+    onError: (e: unknown) => setToast(`Couldn't add folder: ${String(e)}`),
   });
 
   const removeSource = useMutation({
