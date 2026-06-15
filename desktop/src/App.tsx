@@ -41,15 +41,28 @@ export default function App() {
   const libraryActive = useStore((s) => s.libraryActive);
   const qc = useQueryClient();
 
-  // Ensure a profile exists (the engine guarantees a default at bootstrap).
-  const profile = useQuery({
+  // The engine guarantees a default profile at bootstrap, so this always
+  // resolves to a profile that exists in the DB right now.
+  const defaultProfile = useQuery({
     queryKey: ["default-profile"],
     queryFn: () => api.defaultProfile(),
-    enabled: profileId === null,
   });
+  // Every profile, used to check whether a persisted id is still valid.
+  const allProfiles = useQuery({
+    queryKey: ["all-profiles"],
+    queryFn: () => api.listProfiles(),
+  });
+  // Adopt the default when we have no profile, and heal a stale persisted id.
+  // A reinstall, DB reset, or profile deletion can leave localStorage pointing
+  // at a profile that no longer exists; without this every command silently
+  // targets a dead profile (foreign-key write failures, empty reads), which
+  // looks like "adding a ROM folder does nothing".
   useEffect(() => {
-    if (profileId === null && profile.data) setProfile(profile.data.id);
-  }, [profileId, profile.data, setProfile]);
+    if (!defaultProfile.data || !allProfiles.data) return;
+    const valid =
+      profileId !== null && allProfiles.data.some((p) => p.id === profileId);
+    if (!valid) setProfile(defaultProfile.data.id);
+  }, [profileId, defaultProfile.data, allProfiles.data, setProfile]);
 
   // Global controller / keyboard navigation.
   useEffect(() => startSpatialNav(), []);
@@ -76,6 +89,12 @@ export default function App() {
       qc.invalidateQueries({ queryKey: ["games"] });
       qc.invalidateQueries({ queryKey: ["game"] });
       qc.invalidateQueries({ queryKey: ["stats"] });
+      // A session can create a new savestate (and, for archive/CHD ROMs whose
+      // serial we can't read up front, teach us the key the emulator named it
+      // by). The Recall State grid is fetched once on mount, so without this it
+      // never shows states written during the session just ended.
+      qc.invalidateQueries({ queryKey: ["save-states"] });
+      qc.invalidateQueries({ queryKey: ["launch-state-support"] });
     });
     return () => {
       unlisten.then((off) => off());
