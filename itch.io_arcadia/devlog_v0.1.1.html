@@ -1,0 +1,51 @@
+<div style="background:#030507;color:#b0c0c8;font-family:'Share Tech Mono',monospace;font-size:14px;line-height:1.65;padding:4px 0;" class="custom-page">
+  <div style="text-align:center;padding:32px 24px 24px;border-bottom:1px solid #003344;" class="custom-hero">
+    <div style="font-family:'Share Tech Mono',monospace;font-size:11px;letter-spacing:5px;color:#384858;text-transform:uppercase;margin-bottom:10px;">EVOL DIGITAL PRODUCTIONS &nbsp;·&nbsp; PATCH LOG</div>
+    <div style="font-family:'VT323',monospace;font-size:56px;letter-spacing:8px;color:#00d4ff;text-shadow:0 0 6px rgba(0,212,255,0.5);text-transform:uppercase;line-height:1;margin-bottom:6px;">v0.1.1<span style="display:inline-block;width:8px;height:0.9em;background:#00d4ff;vertical-align:text-bottom;"></span></div>
+    <div style="font-family:'VT323',monospace;font-size:24px;letter-spacing:6px;color:#ff4dd2;text-shadow:0 0 6px rgba(255,77,210,0.5);margin-bottom:14px;">STABILITY PASS</div>
+    <div style="font-family:'Share Tech Mono',monospace;font-size:12px;color:#384858;letter-spacing:2px;border:1px solid #1a2535;display:inline-block;padding:4px 16px;">[ LARGE-LIBRARY SCANS &nbsp;//&nbsp; LIVE PROGRESS &nbsp;//&nbsp; CONTROLLER + SAVE FIXES ]</div>
+  </div>
+
+  <div style="padding:28px 24px;border-bottom:1px solid #1a2535;" class="custom-section">
+    <p style="margin:0 0 22px;color:#b0c0c8;">A maintenance release that hardens the parts you actually touch every day &mdash; indexing, launching, and saves. No new modules, just fewer ways for the existing ones to trip. Arcadia is still the <strong style="color:#ff4dd2;">conductor, not the orchestra</strong>.</p>
+
+    <div style="margin-bottom:18px;" class="custom-section-header">
+      <div style="font-family:'VT323',monospace;font-size:28px;letter-spacing:3px;color:#00d4ff;text-shadow:0 0 6px rgba(0,212,255,0.5);display:inline-block;">&gt;_ FIXED</div>
+      <div style="height:1px;background:linear-gradient(to right,#00d4ff,#0099b3,transparent);margin-top:8px;opacity:0.4;"></div>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:26px;" class="custom-feature-grid">
+      <div style="background:#080c10;border:1px solid #003344;border-left:3px solid #00d4ff;padding:14px 16px;">
+        <div style="font-family:'VT323',monospace;font-size:18px;color:#ff4dd2;letter-spacing:1px;margin-bottom:6px;">SCANS NO LONGER STALL</div>
+        <p style="font-size:13px;color:#b0c0c8;margin:0;">A disc-grouping bug could abort indexing partway through on Sega CD / Mega&#8209;CD sets &mdash; the scan looked frozen near the end. Big libraries (10,000+ ROMs) now index cleanly to completion.</p>
+      </div>
+      <div style="background:#080c10;border:1px solid #003344;border-left:3px solid #00d4ff;padding:14px 16px;">
+        <div style="font-family:'VT323',monospace;font-size:18px;color:#ff4dd2;letter-spacing:1px;margin-bottom:6px;">DISCONNECTED-DRIVE GUARD</div>
+        <p style="font-size:13px;color:#b0c0c8;margin:0;">Launching a game from an unplugged external drive now shows a clear &ldquo;reconnect the drive&rdquo; message instead of handing the emulator a missing file and letting it crash.</p>
+      </div>
+      <div style="background:#080c10;border:1px solid #003344;border-left:3px solid #00d4ff;padding:14px 16px;">
+        <div style="font-family:'VT323',monospace;font-size:18px;color:#ff4dd2;letter-spacing:1px;margin-bottom:6px;">SAVES FOR COMPRESSED ROMS</div>
+        <p style="font-size:13px;color:#b0c0c8;margin:0;">Savestates for games stored as <code style="color:#00d4ff;">.zip</code> / <code style="color:#00d4ff;">.7z</code> now resolve to the right files &mdash; states written against the extracted ROM are discovered in place.</p>
+      </div>
+      <div style="background:#080c10;border:1px solid #003344;border-left:3px solid #00d4ff;padding:14px 16px;">
+        <div style="font-family:'VT323',monospace;font-size:18px;color:#ff4dd2;letter-spacing:1px;margin-bottom:6px;">WIDER CONTROLLER FIX</div>
+        <p style="font-size:13px;color:#b0c0c8;margin:0;">The Bluetooth controller compatibility fix (xpadneo / SDL backend) now applies automatically across every standalone emulator, not just a handful &mdash; your pad just works.</p>
+      </div>
+    </div>
+
+    <div style="margin-bottom:18px;" class="custom-section-header">
+      <div style="font-family:'VT323',monospace;font-size:28px;letter-spacing:3px;color:#00d4ff;text-shadow:0 0 6px rgba(0,212,255,0.5);display:inline-block;">&gt;_ IMPROVED</div>
+      <div style="height:1px;background:linear-gradient(to right,#00d4ff,#0099b3,transparent);margin-top:8px;opacity:0.4;"></div>
+    </div>
+    <ul style="list-style:none;padding:0;margin:0;" class="custom-stat-list">
+      <li style="padding:7px 0;border-bottom:1px solid #1a2535;font-size:13px;display:flex;gap:8px;"><strong style="color:#ff4dd2;">Live progress</strong> &mdash; the sidebar now shows real-time progress for library scans and box-art fetches, clears itself when done, and surfaces failures instead of spinning forever.</li>
+      <li style="padding:7px 0;border-bottom:1px solid #1a2535;font-size:13px;display:flex;gap:8px;"><strong style="color:#ff4dd2;">Settings, organized</strong> &mdash; the Settings screen is now split into tabs so the controls are easier to find.</li>
+      <li style="padding:7px 0;border-bottom:1px solid #1a2535;font-size:13px;display:flex;gap:8px;"><strong style="color:#ff4dd2;">Steadier indexing</strong> &mdash; the scanner writes in bounded batches under SQLite WAL, so a long indexing run stays responsive and shows partial progress.</li>
+      <li style="padding:7px 0;border-bottom:none;font-size:13px;display:flex;gap:8px;"><strong style="color:#ff4dd2;">Quieter recovery</strong> &mdash; stale profile references self-heal, and archive extractions persist across launches so saves keep resolving.</li>
+    </ul>
+  </div>
+
+  <div style="padding:24px;background:#080c10;border-top:1px solid #1a2535;text-align:center;" class="custom-specs-section">
+    <p style="font-size:13px;color:#b0c0c8;margin:0 0 12px;">Grab the updated build from the <strong style="color:#e0ecf4;">Download</strong> section &mdash; AppImage, .deb, .rpm, Flatpak, and an AUR-style <code style="color:#00d4ff;">PKGBUILD</code> on <a href="https://github.com/Evol-Luci/arcadia" target="_blank" rel="noopener" style="color:#ff4dd2;text-decoration:none;">GitHub</a>. 100% local. DRM-free. Open source.</p>
+    <div style="font-size:11px;color:#1a2535;letter-spacing:2px;">EVOL DIGITAL PRODUCTIONS &nbsp;·&nbsp; EST. 2026 &nbsp;·&nbsp; WE NEVER OWN THE EMULATOR</div>
+  </div>
+</div>
