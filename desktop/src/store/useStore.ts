@@ -17,6 +17,15 @@ export type View =
 const THEME_KEY = "arcadia.theme";
 const PROFILE_KEY = "arcadia.profile";
 
+export interface ProgressState {
+  /** "scan" | "artwork" | "metadata" */
+  kind: string;
+  label: string;
+  done: number;
+  /** 0 means indeterminate (e.g. a filesystem walk of unknown size). */
+  total: number;
+}
+
 interface AppStore {
   view: View;
   profileId: string | null;
@@ -24,6 +33,9 @@ interface AppStore {
   themeId: string;
   /** Toast-style transient message (e.g. launch feedback). */
   toast: string | null;
+  /** Live progress of a background job (library scan / box-art fetch), or null
+   *  when nothing is running. Driven by 'arcadia://progress' events. */
+  progress: ProgressState | null;
   /** Cache-buster appended to artwork URLs. Covers are written to stable,
    *  deterministic paths (libretro cache keyed by ROM name, manual covers by
    *  game id), so correcting one overwrites the same file at the same path —
@@ -45,6 +57,7 @@ interface AppStore {
   openGame: (id: string) => void;
   setTheme: (id: string) => void;
   setToast: (msg: string | null) => void;
+  setProgress: (p: ProgressState | null) => void;
   bumpCoverVersion: () => void;
   /** Open a console section (or null for All) and leave the picker. */
   openLibrarySection: (platform: string | null) => void;
@@ -64,6 +77,7 @@ export const useStore = create<AppStore>((set) => {
     selectedGameId: null,
     themeId: savedTheme,
     toast: null,
+    progress: null,
     // Seed per-launch so a stale image persisted by the webview's HTTP cache is
     // bypassed on startup; in-session cover changes bump it further.
     coverVersion: Date.now(),
@@ -85,6 +99,7 @@ export const useStore = create<AppStore>((set) => {
       set({ themeId });
     },
     setToast: (toast) => set({ toast }),
+    setProgress: (progress) => set({ progress }),
     bumpCoverVersion: () => set((s) => ({ coverVersion: s.coverVersion + 1 })),
     openLibrarySection: (libraryPlatform) =>
       set({ libraryPlatform, librarySearch: "", libraryActive: true }),

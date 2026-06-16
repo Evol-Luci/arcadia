@@ -101,6 +101,38 @@ export default function App() {
     };
   }, [qc]);
 
+  // Background jobs (library scan, box-art fetch) push progress events so the
+  // sidebar can show a live bar. On the terminal event we refresh the library so
+  // freshly-fetched covers appear, then clear the bar after a brief beat.
+  useEffect(() => {
+    const setProgress = useStore.getState().setProgress;
+    let clearTimer: ReturnType<typeof setTimeout> | undefined;
+    const unlisten = listen<{
+      kind: string;
+      label: string;
+      done: number;
+      total: number;
+      finished: boolean;
+    }>("arcadia://progress", (e) => {
+      const p = e.payload;
+      if (!p) return;
+      if (clearTimer) clearTimeout(clearTimer);
+      if (p.finished) {
+        setProgress({ kind: p.kind, label: p.label, done: p.total, total: p.total });
+        qc.invalidateQueries({ queryKey: ["games"] });
+        qc.invalidateQueries({ queryKey: ["game"] });
+        qc.invalidateQueries({ queryKey: ["stats"] });
+        clearTimer = setTimeout(() => setProgress(null), 2500);
+      } else {
+        setProgress({ kind: p.kind, label: p.label, done: p.done, total: p.total });
+      }
+    });
+    return () => {
+      if (clearTimer) clearTimeout(clearTimer);
+      unlisten.then((off) => off());
+    };
+  }, [qc]);
+
   // B button / Escape => back; bumpers => switch tabs.
   useEffect(() => {
     const onBack = () => {

@@ -905,6 +905,8 @@ impl Engine {
         // Fetch box art concurrently (network-bound, and many requests 404),
         // but cap concurrency to stay polite to the libretro CDN. DB writes are
         // kept serialized on this task — SQLite has a single writer.
+        let total = games.len();
+        self.emit_progress(profile_id, "artwork", "Fetching box art", 0, total, false);
         let provider = Arc::new(LibretroThumbnailProvider::new(self.paths.artwork_dir()));
         let sem = Arc::new(Semaphore::new(8));
         let mut set = tokio::task::JoinSet::new();
@@ -921,12 +923,16 @@ impl Engine {
             });
         }
 
+        let mut processed = 0usize;
         while let Some(res) = set.join_next().await {
             if let Ok(Some((id, patch))) = res {
                 self.apply_patch(&id, &patch).await?;
                 updated += 1;
             }
+            processed += 1;
+            self.emit_progress(profile_id, "artwork", "Fetching box art", processed, total, false);
         }
+        self.emit_progress(profile_id, "artwork", "Box art complete", total, total, true);
 
         // Text metadata pass (synopsis/genre/developer/publisher/date). No-ops
         // unless the user has configured ScreenScraper credentials.

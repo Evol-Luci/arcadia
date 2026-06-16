@@ -20,6 +20,9 @@ pub enum EngineError {
     #[error("not found: {0}")]
     NotFound(String),
 
+    #[error("{0}")]
+    Unreachable(String),
+
     #[error("invalid input: {0}")]
     Invalid(String),
 

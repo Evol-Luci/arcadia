@@ -134,11 +134,50 @@ impl Engine {
         .await?)
     }
 
+    /// Remove a ROM source and every game that was indexed from under it.
+    ///
+    /// Games discovered elsewhere are left alone even if a second source still
+    /// covers them. A game counts as "under" the removed folder only on a path
+    /// boundary (`/roms/snes` does not swallow `/roms/snes-extra`). `game_discs`
+    /// rows clear via `ON DELETE CASCADE`; we also delete them explicitly so the
+    /// cleanup holds on connections without foreign keys enforced (tests).
     pub async fn remove_rom_source(&self, id: &str) -> Result<()> {
+        let Some((profile_id, path)) = sqlx::query_as::<_, (String, String)>(
+            "SELECT profile_id, path FROM rom_sources WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?
+        else {
+            return Ok(());
+        };
+
+        let games = sqlx::query_as::<_, (String, String)>(
+            "SELECT id, rom_path FROM games WHERE profile_id = ?",
+        )
+        .bind(&profile_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let prefix = format!("{}/", path.trim_end_matches('/'));
+        let mut tx = self.pool.begin().await?;
+        for (game_id, rom_path) in games {
+            if rom_path == path || rom_path.starts_with(&prefix) {
+                sqlx::query("DELETE FROM game_discs WHERE game_id = ?")
+                    .bind(&game_id)
+                    .execute(&mut *tx)
+                    .await?;
+                sqlx::query("DELETE FROM games WHERE id = ?")
+                    .bind(&game_id)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+        }
         sqlx::query("DELETE FROM rom_sources WHERE id = ?")
             .bind(id)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -147,11 +186,31 @@ impl Engine {
     /// Walk every ROM source for a profile, indexing recognised ROMs. Existing
     /// games (same profile + path) are left untouched.
     pub async fn scan_library(&self, profile_id: &str) -> Result<ScanReport> {
+        // The indexing burst can fail mid-scan (e.g. a constraint violation on a
+        // pathological disc set). The progress channel is fire-and-forget: if we
+        // return early on `?` without a terminal event, the sidebar bar is left
+        // parked at its last `done/total` and looks frozen rather than failed.
+        // Wrap the body so any error emits a terminal `finished` event first,
+        // letting the UI clear the indicator and surface the failure.
+        match self.scan_library_inner(profile_id).await {
+            Ok(report) => Ok(report),
+            Err(e) => {
+                tracing::error!(error = %e, "library scan failed");
+                self.emit_progress(profile_id, "scan", "Scan failed", 0, 0, true);
+                Err(e)
+            }
+        }
+    }
+
+    async fn scan_library_inner(&self, profile_id: &str) -> Result<ScanReport> {
         let sources = self.list_rom_sources(profile_id).await?;
         let source_paths: Vec<String> = sources.iter().map(|s| s.path.clone()).collect();
         let now = now_rfc3339();
 
         tracing::info!(profile = %profile_id, sources = sources.len(), "library scan started");
+        // Indeterminate while the filesystem walk runs — its size isn't known
+        // until it finishes, but the sidebar should show the scan is alive.
+        self.emit_progress(profile_id, "scan", "Scanning ROM folders", 0, 0, false);
 
         // The walk is filesystem-bound — often minutes on an external USB drive
         // with tens of thousands of files — and uses fully blocking IO. Run it
@@ -192,13 +251,44 @@ impl Engine {
         // pruned afterwards. Non-primary disc images are intentionally NOT marked
         // seen — that lets older per-disc game rows get pruned on the first
         // rescan after grouping lands.
-        let mut seen: HashSet<String> = HashSet::with_capacity(singles.len() + disc_groups.len());
+        let index_total = singles.len() + disc_groups.len();
+        // Indexing is a tight DB-write burst — thousands of items in well under a
+        // second on a big library. Emitting per item floods the progress channel
+        // and IPC bridge, which drops the tail (the bar froze a few short). Cap to
+        // ~100 updates, but always emit the final item so the bar reliably lands
+        // on 100% before the `finished` event clears it.
+        let emit_step = (index_total / 100).max(1);
+        let mut indexed = 0usize;
+        let mut seen: HashSet<String> = HashSet::with_capacity(index_total);
+        // Batch the index into bounded transactions instead of one giant one.
+        // Under WAL + synchronous=NORMAL a commit is a cheap WAL append (no
+        // fsync until checkpoint), so committing every `COMMIT_CHUNK` games turns
+        // tens of thousands of auto-commits into a couple dozen — the difference
+        // between a frozen scan and a fast one — WITHOUT holding a single
+        // connection and the write lock across thousands of await round-trips to
+        // the sqlite worker thread (that long-held transaction wedged the scan
+        // future at the commit boundary on large libraries). Periodic commits
+        // also let the UI see partial progress and keep the page cache / WAL
+        // bounded. ON CONFLICT upserts are idempotent, so a partial scan is safe.
+        const COMMIT_CHUNK: usize = 1000;
+        let mut since_commit = 0usize;
+        let mut tx = self.pool.begin().await?;
         for c in singles {
             let gid = self
-                .insert_game(profile_id, &c.title, c.platform, &c.rom_path, c.size, &now, &mut report)
+                .insert_game(&mut tx, profile_id, &c.title, c.platform, &c.rom_path, c.size, &now, &mut report)
                 .await?;
-            self.replace_discs(&gid, &[]).await?;
+            self.replace_discs(&mut tx, &gid, &[]).await?;
             seen.insert(c.rom_path);
+            indexed += 1;
+            if indexed % emit_step == 0 || indexed == index_total {
+                self.emit_progress(profile_id, "scan", "Indexing games", indexed, index_total, false);
+            }
+            since_commit += 1;
+            if since_commit >= COMMIT_CHUNK {
+                tx.commit().await?;
+                tx = self.pool.begin().await?;
+                since_commit = 0;
+            }
         }
         for ((_platform, _key), mut group) in disc_groups {
             group.sort_by_key(|c| {
@@ -213,11 +303,22 @@ impl Engine {
                 let c = &group[0];
                 let gid = self
                     .insert_game(
-                        profile_id, &c.title, c.platform, &c.rom_path, c.size, &now, &mut report,
+                        &mut tx, profile_id, &c.title, c.platform, &c.rom_path, c.size, &now,
+                        &mut report,
                     )
                     .await?;
-                self.replace_discs(&gid, &[]).await?;
+                self.replace_discs(&mut tx, &gid, &[]).await?;
                 seen.insert(c.rom_path.clone());
+                indexed += 1;
+                if indexed % emit_step == 0 || indexed == index_total {
+                    self.emit_progress(profile_id, "scan", "Indexing games", indexed, index_total, false);
+                }
+                since_commit += 1;
+                if since_commit >= COMMIT_CHUNK {
+                    tx.commit().await?;
+                    tx = self.pool.begin().await?;
+                    since_commit = 0;
+                }
                 continue;
             }
 
@@ -225,27 +326,49 @@ impl Engine {
             let title = base_title(&primary.title);
             let gid = self
                 .insert_game(
-                    profile_id, &title, primary.platform, &primary.rom_path, primary.size, &now,
-                    &mut report,
+                    &mut tx, profile_id, &title, primary.platform, &primary.rom_path, primary.size,
+                    &now, &mut report,
                 )
                 .await?;
-            let discs: Vec<(i64, String, String)> = group
-                .iter()
-                .enumerate()
-                .map(|(i, c)| {
-                    let stem = std::path::Path::new(&c.rom_path)
-                        .file_stem()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("");
-                    let n = disc_number(stem).unwrap_or((i + 1) as i64);
-                    (n, c.rom_path.clone(), format!("Disc {n}"))
-                })
-                .collect();
-            self.replace_discs(&gid, &discs).await?;
+            // Assign each disc a UNIQUE number. Even after the grouping fixes,
+            // a legitimate set can carry duplicate parsed numbers (e.g.
+            // "Game (Disc 1)" alongside "Game (Disc 1) (Rev A)"); bumping
+            // collisions to the next free slot keeps every disc and guarantees
+            // we never violate the (game_id, disc_number) UNIQUE constraint,
+            // which would otherwise abort the entire library scan.
+            let mut used: HashSet<i64> = HashSet::new();
+            let mut discs: Vec<(i64, String, String)> = Vec::with_capacity(group.len());
+            for (i, c) in group.iter().enumerate() {
+                let stem = std::path::Path::new(&c.rom_path)
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("");
+                let mut n = disc_number(stem).unwrap_or((i + 1) as i64);
+                while !used.insert(n) {
+                    n += 1;
+                }
+                discs.push((n, c.rom_path.clone(), format!("Disc {n}")));
+            }
+            self.replace_discs(&mut tx, &gid, &discs).await?;
             seen.insert(primary.rom_path.clone());
+            indexed += 1;
+            if indexed % emit_step == 0 || indexed == index_total {
+                self.emit_progress(profile_id, "scan", "Indexing games", indexed, index_total, false);
+            }
+            since_commit += 1;
+            if since_commit >= COMMIT_CHUNK {
+                tx.commit().await?;
+                tx = self.pool.begin().await?;
+                since_commit = 0;
+            }
         }
 
+        // Commit the final partial chunk (may be empty — committing an empty
+        // transaction is a cheap no-op).
+        tx.commit().await?;
+
         report.removed = self.prune_stale(profile_id, &source_paths, &seen).await?;
+        self.emit_progress(profile_id, "scan", "Scan complete", index_total, index_total, true);
         self.ensure_platforms_seeded().await?;
         tracing::info!(
             scanned = report.scanned_files,
@@ -266,6 +389,7 @@ impl Engine {
     #[allow(clippy::too_many_arguments)]
     async fn insert_game(
         &self,
+        conn: &mut sqlx::SqliteConnection,
         profile_id: &str,
         title: &str,
         platform: &str,
@@ -280,7 +404,7 @@ impl Engine {
         )
         .bind(profile_id)
         .bind(rom_path)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *conn)
         .await?;
 
         let id = existing_id.clone().unwrap_or_else(new_id);
@@ -305,7 +429,7 @@ impl Engine {
         .bind(rom_path)
         .bind(size)
         .bind(now)
-        .execute(&self.pool)
+        .execute(&mut *conn)
         .await?;
 
         if existing_id.is_some() {
@@ -319,10 +443,15 @@ impl Engine {
     /// Replace a game's disc list with `discs` (ordered `(disc_number, path,
     /// label)`). Used for multi-disc sets; a no-op list clears the rows, turning
     /// the game back into a plain single-disc entry.
-    async fn replace_discs(&self, game_id: &str, discs: &[(i64, String, String)]) -> Result<()> {
+    async fn replace_discs(
+        &self,
+        conn: &mut sqlx::SqliteConnection,
+        game_id: &str,
+        discs: &[(i64, String, String)],
+    ) -> Result<()> {
         sqlx::query("DELETE FROM game_discs WHERE game_id = ?")
             .bind(game_id)
-            .execute(&self.pool)
+            .execute(&mut *conn)
             .await?;
         for (number, path, label) in discs {
             sqlx::query(
@@ -332,7 +461,7 @@ impl Engine {
             .bind(number)
             .bind(path)
             .bind(label)
-            .execute(&self.pool)
+            .execute(&mut *conn)
             .await?;
         }
         Ok(())
@@ -771,6 +900,18 @@ fn find_disc_marker(lower: &str) -> Option<(usize, &'static str, i64)> {
             if !at_word_boundary(lower, idx, kw) {
                 continue;
             }
+            // "cd" is dangerously ambiguous: it appears in hardware names far
+            // more often than as a disc tag ("Mega-CD 2", "Sega CD 2",
+            // "Sega CDX"). A genuine disc marker spelled "cd" is universally
+            // parenthesised/bracketed ("(CD 2)", "(CD2)"), so only honour it
+            // there. Otherwise unrelated BIOS dumps collapse to one "game" with
+            // colliding disc numbers and the whole scan aborts on the
+            // (game_id, disc_number) UNIQUE constraint.
+            if kw == "cd"
+                && !matches!(lower[..idx].chars().next_back(), Some('(') | Some('['))
+            {
+                continue;
+            }
             let rest = lower[idx + kw.len()..]
                 .trim_start_matches([' ', '_', '-', '.', '#', ':']);
             let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
@@ -846,6 +987,95 @@ fn sort_key(title: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{base_title, disc_number};
+    use crate::{db, Engine};
+
+    async fn insert_game(engine: &Engine, profile_id: &str, id: &str, rom_path: &str) {
+        sqlx::query(
+            "INSERT INTO games (id, profile_id, title, sort_title, platform, rom_path, added_at)
+             VALUES (?, ?, ?, ?, 'snes', ?, '2026-01-01T00:00:00Z')",
+        )
+        .bind(id)
+        .bind(profile_id)
+        .bind(id)
+        .bind(id)
+        .bind(rom_path)
+        .execute(&engine.pool)
+        .await
+        .unwrap();
+    }
+
+    async fn game_ids(engine: &Engine, profile_id: &str) -> Vec<String> {
+        sqlx::query_as::<_, (String,)>("SELECT id FROM games WHERE profile_id = ? ORDER BY id")
+            .bind(profile_id)
+            .fetch_all(&engine.pool)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|(id,)| id)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn remove_rom_source_deletes_only_games_under_that_folder() {
+        let pool = db::connect_in_memory().await.unwrap();
+        let engine = Engine::with_pool(pool).await.unwrap();
+        let profile = engine.ensure_default_profile().await.unwrap();
+
+        // Two real source folders plus a sibling path that shares a prefix.
+        let src = sqlx::query_as::<_, crate::models::RomSource>(
+            "INSERT INTO rom_sources (id, profile_id, path, added_at)
+             VALUES ('s1', ?, '/roms/snes', '2026-01-01T00:00:00Z') RETURNING *",
+        )
+        .bind(&profile.id)
+        .fetch_one(&engine.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO rom_sources (id, profile_id, path, added_at)
+             VALUES ('s2', ?, '/roms/nes', '2026-01-01T00:00:00Z')",
+        )
+        .bind(&profile.id)
+        .execute(&engine.pool)
+        .await
+        .unwrap();
+
+        insert_game(&engine, &profile.id, "under", "/roms/snes/Game.sfc").await;
+        insert_game(&engine, &profile.id, "exact", "/roms/snes").await;
+        insert_game(&engine, &profile.id, "sibling", "/roms/snes-extra/Game.sfc").await;
+        insert_game(&engine, &profile.id, "other", "/roms/nes/Game.nes").await;
+
+        // The removed game has discs; they must go too.
+        sqlx::query(
+            "INSERT INTO game_discs (game_id, disc_number, rom_path) VALUES ('under', 1, '/roms/snes/Game.sfc')",
+        )
+        .execute(&engine.pool)
+        .await
+        .unwrap();
+
+        engine.remove_rom_source(&src.id).await.unwrap();
+
+        let remaining = game_ids(&engine, &profile.id).await;
+        assert_eq!(remaining, vec!["other".to_string(), "sibling".to_string()]);
+
+        let discs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM game_discs WHERE game_id = 'under'")
+            .fetch_one(&engine.pool)
+            .await
+            .unwrap();
+        assert_eq!(discs, 0);
+
+        let sources: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM rom_sources WHERE id = 's1'")
+            .fetch_one(&engine.pool)
+            .await
+            .unwrap();
+        assert_eq!(sources, 0);
+    }
+
+    #[tokio::test]
+    async fn remove_unknown_source_is_a_noop() {
+        let pool = db::connect_in_memory().await.unwrap();
+        let engine = Engine::with_pool(pool).await.unwrap();
+        engine.remove_rom_source("does-not-exist").await.unwrap();
+    }
 
     #[test]
     fn disc_number_reads_common_conventions() {

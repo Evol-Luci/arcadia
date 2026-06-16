@@ -241,12 +241,25 @@ impl Engine {
         // database-keyed emulators like Mupen64Plus); otherwise resolve one from
         // the ROM (disc serial / game id). One of these is `None` for most
         // games, which simply yields no savestates.
+        // The disc key is always derived from the *original* ROM (its serial, or a
+        // key learned from a prior session) — unchanged behaviour for DiscKey
+        // emulators (PCSX2, DuckStation, Dolphin, Mupen).
         let disc_key = match self.learned_state_key(game_id).await? {
             Some(key) => Some(key),
             None => resolve_disc_key(&game.platform, &game.rom_path),
         };
+        // For stem-/RomDir-keyed emulators, states for an *archived* ROM don't live
+        // beside the `.zip`/`.7z` on the source — the emulator ran the file we
+        // extracted into the cache, so it wrote states there, named after the
+        // extracted file's inner stem (which can differ from the archive's name).
+        // Point discovery at that already-extracted file when one exists; otherwise
+        // (raw ROM, or never launched) keep the original path. This doesn't affect
+        // DiscKey emulators: none key their state dir off rom_path.
+        let scan_rom = crate::archive::existing_extraction(std::path::Path::new(&game.rom_path))
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|| game.rom_path.clone());
         let ctx = crate::adapters::ScanContext {
-            rom_path: game.rom_path.clone(),
+            rom_path: scan_rom,
             platform: game.platform.clone(),
             flatpak_app_id: flatpak_app_id_of(&emulator),
             disc_key,

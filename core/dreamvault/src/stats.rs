@@ -123,6 +123,15 @@ impl Engine {
         launch_rom: String,
         load_state: Option<crate::adapters::LoadState>,
     ) -> Result<LaunchResult> {
+        // Fail fast with a human message if the game's files aren't on disk. The
+        // overwhelmingly common cause is an unmounted external drive: the whole
+        // path tree vanishes, so every emulator would otherwise just be handed a
+        // missing path and crash or pop its own cryptic "file does not exist"
+        // dialog. We check the game's primary ROM (always a real file on the
+        // source, even for multi-disc sets whose `launch_rom` is a generated
+        // .m3u in the cache).
+        ensure_rom_reachable(&game.rom_path)?;
+
         let emulator = match &game.emulator_id {
             Some(id) => self.get_emulator(id).await?,
             None => self.emulator_for_platform(&game.platform).await?,
@@ -397,6 +406,37 @@ impl Engine {
     }
 }
 
+/// Verify a game's ROM is actually present before we hand it to an emulator.
+///
+/// When an external drive is disconnected the entire path tree disappears, so a
+/// launch would otherwise just spawn the emulator on a missing file — which
+/// crashes it or pops a cryptic per-emulator "file does not exist" dialog. We
+/// translate that into one clear message, pointing at the topmost missing
+/// ancestor (typically the unmounted mount point) so the user knows it's a
+/// drive/folder problem, not a corrupt library.
+fn ensure_rom_reachable(rom_path: &str) -> Result<()> {
+    let path = std::path::Path::new(rom_path);
+    if path.exists() {
+        return Ok(());
+    }
+    // Walk upward to the highest-level ancestor that's also missing — for an
+    // unmounted drive that's the mount point itself (e.g. the whole
+    // `/run/media/<user>/<label>` directory is gone), which is the most useful
+    // thing to name.
+    let mut missing = path;
+    for ancestor in path.ancestors() {
+        if ancestor.exists() {
+            break;
+        }
+        missing = ancestor;
+    }
+    Err(EngineError::Unreachable(format!(
+        "This game's files are unreachable — the drive or folder may be disconnected ({}). \
+         Reconnect it and try again.",
+        missing.display()
+    )))
+}
+
 /// Is this ROM path a `.zip`/`.7z` we might need to extract before launch?
 fn rom_is_archive(rom_path: &str) -> bool {
     std::path::Path::new(rom_path)
@@ -415,4 +455,34 @@ fn platform_supports_m3u(platform: &str) -> bool {
         platform,
         "ps1" | "ps2" | "psp" | "saturn" | "segacd" | "dreamcast" | "pcengine"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reachable_rom_is_ok() {
+        let f = std::env::temp_dir().join(format!("arcadia-reach-{}.rom", crate::new_id()));
+        std::fs::write(&f, b"x").unwrap();
+        assert!(ensure_rom_reachable(&f.to_string_lossy()).is_ok());
+        std::fs::remove_file(&f).ok();
+    }
+
+    #[test]
+    fn missing_drive_reports_topmost_missing_ancestor() {
+        // Simulate an unmounted drive: a deep path whose whole subtree is gone.
+        let base = std::env::temp_dir().join(format!("arcadia-gone-{}", crate::new_id()));
+        let rom = base.join("Sony/PS2/Games/Whatever/disc.iso");
+        let err = ensure_rom_reachable(&rom.to_string_lossy()).unwrap_err();
+        match err {
+            EngineError::Unreachable(msg) => {
+                assert!(msg.contains("unreachable"), "msg: {msg}");
+                // Names the highest missing ancestor (the missing base), not the
+                // deep ROM path, so the message points at the disconnected root.
+                assert!(msg.contains(&*base.to_string_lossy()), "msg: {msg}");
+            }
+            other => panic!("expected Unreachable, got {other:?}"),
+        }
+    }
 }
