@@ -18,6 +18,12 @@ pub async fn connect(path: &Path) -> Result<Pool> {
         .foreign_keys(true)
         // WAL keeps reads fast while a scan writes — matters for large libraries.
         .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+        // NORMAL is the documented-safe companion to WAL: COMMIT no longer fsyncs
+        // (fsync happens only at checkpoint), so a big scan that writes thousands
+        // of rows isn't bottlenecked on one disk flush per row. The only durability
+        // cost is losing the very last transaction on a power loss — acceptable for
+        // a library index that can simply be re-scanned; no corruption risk.
+        .synchronous(sqlx::sqlite::SqliteSynchronous::Normal)
         .busy_timeout(std::time::Duration::from_secs(5));
 
     let pool = SqlitePoolOptions::new()

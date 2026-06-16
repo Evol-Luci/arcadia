@@ -25,6 +25,9 @@ enum StateLocation {
     Config(&'static str),
     /// Under the XDG data root (`~/.local/share`, or `…/data` in a Flatpak).
     Data(&'static str),
+    /// A per-game subdirectory under the XDG data root, named by the ROM stem:
+    /// `<data>/<sub>/<stem>/` (BlastEm: `data/blastem/<rom name>/slot_N.state`).
+    DataPerGame(&'static str),
     /// In the same directory as the ROM (Snes9x's default, no folder set).
     RomDir,
     /// Directly under `$HOME`, for emulators with their own dotdir base rather
@@ -77,6 +80,10 @@ impl SaveStateScheme {
             StateLocation::RomDir => Path::new(rom_path).parent().map(Path::to_path_buf),
             StateLocation::Config(sub) => Some(xdg_base(flatpak_app_id, true)?.join(sub)),
             StateLocation::Data(sub) => Some(xdg_base(flatpak_app_id, false)?.join(sub)),
+            StateLocation::DataPerGame(sub) => {
+                let stem = Path::new(rom_path).file_stem()?.to_str()?;
+                Some(xdg_base(flatpak_app_id, false)?.join(sub).join(stem))
+            }
             StateLocation::Home(sub) => {
                 Some(PathBuf::from(std::env::var_os("HOME")?).join(sub))
             }
@@ -176,6 +183,34 @@ fn parse_flycast(name: &str, stem: &str) -> Option<i64> {
         return Some(0);
     }
     let slot = rest.strip_prefix(&format!("{stem}_"))?;
+    (!slot.is_empty() && slot.bytes().all(|b| b.is_ascii_digit()))
+        .then(|| slot.parse().ok())
+        .flatten()
+}
+
+/// melonDS: `<stem>.ml<slot>` written beside the ROM (when no Savestate path is
+/// configured), e.g. `0028 - Kirby - Canvas Curse (USA).ml1` (slots 1..8). Keyed
+/// by stem; because NDS dumps are usually zipped, the "ROM dir" discovery scans is
+/// the *extraction cache* and the stem is the extracted file's inner name (see
+/// `Engine::list_save_states`). The `.dsv` battery save doesn't match `.ml<N>`.
+fn parse_melonds(name: &str, stem: &str) -> Option<i64> {
+    let slot = name.strip_prefix(&format!("{stem}.ml"))?;
+    (!slot.is_empty() && slot.bytes().all(|b| b.is_ascii_digit()))
+        .then(|| slot.parse().ok())
+        .flatten()
+}
+
+/// BlastEm: states live in a per-game folder `data/blastem/<rom name>/`, holding
+/// `slot_<N>.state` (numbered slots, 0..9) and `quicksave.state` (the F5 quick
+/// slot, mapped to the auto/resume slot `-1`). Confirmed from real files
+/// (`slot_0.state`, `quicksave.state`). The folder is the discovery dir, so the
+/// stem isn't needed to match within it.
+fn parse_blastem(name: &str, _stem: &str) -> Option<i64> {
+    let base = name.strip_suffix(".state")?;
+    if base == "quicksave" {
+        return Some(-1);
+    }
+    let slot = base.strip_prefix("slot_")?;
     (!slot.is_empty() && slot.bytes().all(|b| b.is_ascii_digit()))
         .then(|| slot.parse().ok())
         .flatten()
@@ -559,7 +594,18 @@ impl StandaloneAdapter {
                 screenshots: true,
             },
             args: |rom| vec![rom.to_string()],
-            save_states: None,
+            // melonDS writes states beside the ROM (no Savestate path configured)
+            // as `<stem>.ml<slot>`. Read-only discovery — no boot-into-state CLI
+            // flag, so it's absent from LAUNCH_STATE_IDS and cards render
+            // non-clickable. Because NDS dumps are normally zipped, discovery runs
+            // against the extraction cache (the extracted file's dir + inner stem),
+            // resolved in `Engine::list_save_states`.
+            save_states: Some(SaveStateScheme {
+                location: StateLocation::RomDir,
+                key: KeyKind::Stem,
+                parse: parse_melonds,
+                learn: None,
+            }),
         })
     }
 
@@ -824,14 +870,31 @@ impl StandaloneAdapter {
     }
 
     pub fn blastem() -> Self {
-        Self::launch_only(
-            "blastem",
-            "BlastEm",
-            &["genesis"],
-            &["blastem"],
-            Some("com.retrodev.blastem"),
-            |rom| vec![rom.to_string()],
-        )
+        Self::new(Spec {
+            id: "blastem",
+            display_name: "BlastEm",
+            platforms: &["genesis"],
+            bin_names: &["blastem"],
+            flatpak_app_id: Some("com.retrodev.blastem"),
+            capabilities: Capabilities {
+                savestates: true,
+                saves: true,
+                achievements: false,
+                screenshots: true,
+            },
+            args: |rom| vec![rom.to_string()],
+            // BlastEm stores states in a per-game folder under its data dir:
+            // `data/blastem/<rom name>/slot_<N>.state` plus `quicksave.state`.
+            // Read-only discovery (no boot-into-state CLI flag → not in
+            // LAUNCH_STATE_IDS). The folder is named after the file BlastEm ran,
+            // i.e. the (extracted) ROM stem, which `DataPerGame` joins on.
+            save_states: Some(SaveStateScheme {
+                location: StateLocation::DataPerGame("blastem"),
+                key: KeyKind::Stem,
+                parse: parse_blastem,
+                learn: None,
+            }),
+        })
     }
 
     /// openMSX boots an MSX cartridge ROM via `-cart <file>`; our MSX extensions
@@ -1159,6 +1222,30 @@ mod tests {
         // The `.state.net` autosave/netplay variant and another game are skipped.
         assert_eq!(parse_flycast("Jet Grind Radio (USA).state.net", stem), None);
         assert_eq!(parse_flycast("Sonic Adventure (USA).state", stem), None);
+    }
+
+    #[test]
+    fn melonds_filenames_map_to_slots() {
+        // Real captured name (slot 1): `<stem>.ml1` beside the extracted ROM.
+        let stem = "0028 - Kirby - Canvas Curse (USA)";
+        assert_eq!(parse_melonds("0028 - Kirby - Canvas Curse (USA).ml1", stem), Some(1));
+        assert_eq!(parse_melonds("0028 - Kirby - Canvas Curse (USA).ml8", stem), Some(8));
+        // The `.dsv` battery save and another game's state are skipped.
+        assert_eq!(parse_melonds("0028 - Kirby - Canvas Curse (USA).dsv", stem), None);
+        assert_eq!(parse_melonds("Mario Kart DS (U).ml1", stem), None);
+    }
+
+    #[test]
+    fn blastem_filenames_map_to_slots() {
+        // Real captured names from `data/blastem/<game>/`: numbered slots plus the
+        // F5 quicksave. The discovery dir is already per-game, so the stem arg is
+        // unused (passed empty here).
+        assert_eq!(parse_blastem("slot_0.state", ""), Some(0));
+        assert_eq!(parse_blastem("slot_9.state", ""), Some(9));
+        assert_eq!(parse_blastem("quicksave.state", ""), Some(-1));
+        // A battery save / non-state file is skipped.
+        assert_eq!(parse_blastem("save.sram", ""), None);
+        assert_eq!(parse_blastem("slot_x.state", ""), None);
     }
 
     #[test]

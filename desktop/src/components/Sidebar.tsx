@@ -17,6 +17,7 @@ const ITEMS: { view: View; label: string; icon: string }[] = [
 export function Sidebar() {
   const view = useStore((s) => s.view);
   const setView = useStore((s) => s.setView);
+  const progress = useStore((s) => s.progress);
   const active = view === "game" ? "library" : view;
 
   return (
@@ -48,11 +49,46 @@ export function Sidebar() {
         </Focusable>
       ))}
 
+      {progress && <ProgressCard progress={progress} />}
+
       <div className="mt-auto px-2 text-[10px] leading-relaxed text-ink-dim/70">
         Powered by DreamVault
         <br />
         v0.1 · Console Mode
       </div>
     </nav>
+  );
+}
+
+function ProgressCard({
+  progress,
+}: {
+  progress: NonNullable<ReturnType<typeof useStore.getState>["progress"]>;
+}) {
+  const { label, done, total } = progress;
+  const indeterminate = total === 0;
+  const pct = indeterminate ? 0 : Math.min(100, Math.round((done / total) * 100));
+
+  return (
+    <div className="mt-3 rounded-xl border border-primary/15 bg-primary/5 px-3 py-2.5">
+      <div className="mb-1.5 flex items-center justify-between gap-2">
+        <span className="truncate text-xs font-semibold text-primary">{label}</span>
+        {!indeterminate && (
+          <span className="shrink-0 text-[10px] tabular-nums text-ink-dim">
+            {done}/{total}
+          </span>
+        )}
+      </div>
+      <div className="h-1.5 overflow-hidden rounded-full bg-surface-2">
+        {indeterminate ? (
+          <div className="h-full w-1/3 animate-progress-indeterminate rounded-full bg-primary" />
+        ) : (
+          <div
+            className="h-full rounded-full bg-primary transition-[width] duration-300"
+            style={{ width: `${pct}%` }}
+          />
+        )}
+      </div>
+    </div>
   );
 }

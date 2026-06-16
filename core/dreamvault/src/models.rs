@@ -151,6 +151,25 @@ pub struct SessionEnded {
     pub duration_minutes: i64,
 }
 
+/// Progress for a long-running background job (library scan, box-art fetch).
+/// The engine emits these as work proceeds; the Tauri layer forwards them to the
+/// webview so the sidebar can show live progress instead of a frozen spinner.
+/// `total == 0` means the work is indeterminate (e.g. a filesystem walk whose
+/// size isn't known up front); `done == total && total > 0` (or `finished`)
+/// means the phase is complete.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProgressEvent {
+    pub profile_id: String,
+    /// Machine-readable phase: "scan" | "artwork" | "metadata".
+    pub kind: String,
+    /// Human-readable label for the sidebar, e.g. "Fetching box art".
+    pub label: String,
+    pub done: usize,
+    pub total: usize,
+    /// True on the terminal event for this job, so the UI can clear the bar.
+    pub finished: bool,
+}
+
 /// A point-in-time backup of a game's save data. `kind` is "manual" for a
 /// user-requested backup or "pre-restore" for the automatic snapshot taken
 /// before a restore overwrites the live saves (Risk-5: never lose data).

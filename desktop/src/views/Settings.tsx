@@ -20,6 +20,23 @@ import type {
   SyncConfig,
 } from "../api/types";
 
+type SettingsTab =
+  | "library"
+  | "emulators"
+  | "metadata"
+  | "accounts"
+  | "appearance"
+  | "profiles";
+
+const TABS: { id: SettingsTab; label: string; icon: string }[] = [
+  { id: "library", label: "Library", icon: "▦" },
+  { id: "emulators", label: "Emulators", icon: "▶" },
+  { id: "metadata", label: "Metadata", icon: "✦" },
+  { id: "accounts", label: "Accounts", icon: "✚" },
+  { id: "appearance", label: "Appearance", icon: "◑" },
+  { id: "profiles", label: "Profiles", icon: "❏" },
+];
+
 export function Settings({ profileId }: { profileId: string }) {
   const qc = useQueryClient();
   const setToast = useStore((s) => s.setToast);
@@ -27,6 +44,7 @@ export function Settings({ profileId }: { profileId: string }) {
   const themeId = useStore((s) => s.themeId);
   const setTheme = useStore((s) => s.setTheme);
   const [newProfile, setNewProfile] = useState("");
+  const [tab, setTab] = useState<SettingsTab>("library");
 
   const emulators = useQuery({
     queryKey: ["emulators"],
@@ -64,7 +82,12 @@ export function Settings({ profileId }: { profileId: string }) {
 
   const removeSource = useMutation({
     mutationFn: (id: string) => api.removeRomSource(id),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["sources", profileId] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["sources", profileId] });
+      qc.invalidateQueries({ queryKey: ["games"] });
+      qc.invalidateQueries({ queryKey: ["stats"] });
+      setToast("ROM folder removed; its games were cleared from the library.");
+    },
   });
 
   const scan = useMutation({
@@ -100,174 +123,203 @@ export function Settings({ profileId }: { profileId: string }) {
   });
 
   return (
-    <div className="animate-fade-up max-w-3xl">
-      <PageHeader
-        title="Settings"
-        subtitle="Emulators, libraries, accounts, and appearance."
-      />
-
-      {/* Emulators */}
-      <Panel title="Emulators" subtitle="Detected on this machine. Arcadia orchestrates them; it never reimplements emulation.">
-        <Focusable
-          onActivate={() => detect.mutate()}
-          ariaLabel="Scan for emulators"
-          className="mb-3 inline-block rounded-xl bg-primary px-4 py-2 text-sm font-semibold text-black"
-        >
-          {detect.isPending ? "Scanning…" : "Scan for emulators"}
-        </Focusable>
-
-        {(emulators.data ?? []).length === 0 ? (
-          <p className="text-sm text-ink-dim">
-            None detected yet. {adapters.data?.length ?? 0} adapters available
-            (RetroArch + standalone). Install an emulator via pacman or Flatpak,
-            then scan.
-          </p>
-        ) : (
-          <ul className="flex flex-col gap-2">
-            {emulators.data!.map((e) => (
-              <EmulatorRow key={e.id} e={e} />
-            ))}
-          </ul>
-        )}
-      </Panel>
-
-      {/* Default emulators per system */}
-      <Panel
-        title="Default Emulators"
-        subtitle="Pick which emulator launches each system. Auto follows Arcadia's recommended pick; a per-game override (on a game's page) still wins over these."
-      >
-        <DefaultEmulatorsPanel onToast={setToast} />
-      </Panel>
-
-      {/* ROM folders */}
-      <Panel title="ROM Folders" subtitle="Read in place at locations you choose. Arcadia never moves or downloads ROMs.">
-        <div className="mb-3 flex gap-2">
-          <Focusable
-            onActivate={() => addSource.mutate()}
-            ariaLabel="Add ROM folder"
-            className="inline-block rounded-xl bg-primary px-4 py-2 text-sm font-semibold text-black"
-          >
-            Add folder…
-          </Focusable>
-          <Focusable
-            onActivate={() => scan.mutate()}
-            ariaLabel="Scan library"
-            className="glass inline-block rounded-xl px-4 py-2 text-sm font-semibold"
-          >
-            {scan.isPending ? "Scanning…" : "Scan library"}
-          </Focusable>
-          <Focusable
-            onActivate={() => enrich.mutate()}
-            ariaLabel="Fetch box art"
-            className="glass inline-block rounded-xl px-4 py-2 text-sm font-semibold"
-          >
-            {enrich.isPending ? "Fetching box art…" : "Fetch box art"}
-          </Focusable>
-        </div>
-        <p className="mb-3 text-xs text-ink-dim">
-          Box art is pulled from the open libretro thumbnail archive (no account
-          needed) and cached locally. Text details (synopsis, genre, developer)
-          come from ScreenScraper when you add credentials below. Large libraries
-          may take a minute.
-        </p>
-        {(sources.data ?? []).length === 0 ? (
-          <p className="text-sm text-ink-dim">No folders added.</p>
-        ) : (
-          <ul className="flex flex-col gap-2">
-            {sources.data!.map((src) => (
-              <li
-                key={src.id}
-                className="glass flex items-center gap-3 rounded-xl p-3 text-sm"
-              >
-                <span className="flex-1 truncate font-mono text-xs">{src.path}</span>
-                <Focusable
-                  onActivate={() => removeSource.mutate(src.id)}
-                  ariaLabel="Remove folder"
-                  className="rounded-lg px-2 py-1 text-xs text-secondary"
-                >
-                  Remove
-                </Focusable>
-              </li>
-            ))}
-          </ul>
-        )}
-      </Panel>
-
-      {/* Metadata provider credentials */}
-      <Panel
-        title="Metadata Provider"
-        subtitle="ScreenScraper credentials are yours — Arcadia ships none. Used under your own rate quota to fetch synopsis, genre, developer, publisher, and release date. Leave blank to skip."
-      >
-        <ScreenScraperPanel onToast={setToast} />
-      </Panel>
-
-      {/* Appearance */}
-      <Panel title="Appearance" subtitle="Theme Engine — re-skins the whole interface instantly. Author your own or import a shared theme.">
-        <ThemePanel
-          themeId={themeId}
-          onApply={setTheme}
-          onToast={setToast}
+    <div className="animate-fade-up">
+      {/* Sticky header + tab bar, bled to the edges of the scroll container so
+          the nav spans the top of the screen and content scrolls under it. */}
+      <div className="sticky -top-8 z-20 -mx-8 -mt-8 mb-6 border-b border-primary/10 bg-surface/85 px-8 pt-8 backdrop-blur-md">
+        <PageHeader
+          title="Settings"
+          subtitle="Emulators, libraries, accounts, and appearance."
         />
-      </Panel>
-
-      {/* RetroAchievements */}
-      <Panel
-        title="RetroAchievements"
-        subtitle="Your RA username and personal Web API key power the Achievement Hub. Arcadia ships no keys and only reads your progress. Leave blank to disable."
-      >
-        <RetroAchievementsPanel onToast={setToast} />
-      </Panel>
-
-      {/* Cloud Sync */}
-      <Panel
-        title="Cloud Sync"
-        subtitle="Point Arcadia at a folder synced by Syncthing, Nextcloud, or similar. Arcadia mirrors save backups additively (never overwriting) and keeps both copies on a config conflict — it runs no sync daemon itself."
-      >
-        <SyncPanel onToast={setToast} />
-      </Panel>
-
-      {/* Profiles */}
-      <Panel title="Workspace Profile" subtitle="Each profile scopes its own ROM folders and library. Click to switch.">
-        <div className="mb-3 flex flex-wrap gap-2">
-          {(profiles.data ?? []).map((p) => (
+        <nav className="-mb-px flex gap-1 overflow-x-auto">
+          {TABS.map((t) => (
             <Focusable
-              key={p.id}
-              onActivate={() => {
-                if (p.id !== profileId) {
-                  setProfile(p.id);
-                  setToast(`Switched to "${p.name}".`);
-                }
-              }}
-              ariaLabel={`Switch to ${p.name}`}
-              className={`glass rounded-full px-3.5 py-1.5 text-xs font-semibold ${
-                p.id === profileId ? "text-primary ring-1 ring-primary" : "text-ink-dim"
+              key={t.id}
+              onActivate={() => setTab(t.id)}
+              ariaLabel={t.label}
+              className={`flex items-center gap-2 whitespace-nowrap rounded-t-lg border-b-2 px-4 py-2.5 text-sm font-semibold ${
+                tab === t.id
+                  ? "border-primary text-primary"
+                  : "border-transparent text-ink-dim hover:text-ink"
               }`}
             >
-              {p.name}
-              {p.is_default ? " · default" : ""}
+              <span className="text-base">{t.icon}</span>
+              {t.label}
             </Focusable>
           ))}
-        </div>
-        <div className="glass flex max-w-sm gap-2 rounded-2xl p-3">
-          <input
-            value={newProfile}
-            onChange={(e) => setNewProfile(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && newProfile.trim())
-                createProfile.mutate(newProfile.trim());
-            }}
-            placeholder="New profile name…"
-            className="flex-1 bg-transparent px-2 text-sm outline-none placeholder:text-ink-dim"
-          />
-          <Focusable
-            onActivate={() => newProfile.trim() && createProfile.mutate(newProfile.trim())}
-            ariaLabel="Create profile"
-            className="rounded-lg bg-primary px-4 py-1.5 text-sm font-semibold text-black"
+        </nav>
+      </div>
+
+      <div className="max-w-3xl">
+        {tab === "library" && (
+          <Panel title="ROM Folders" subtitle="Read in place at locations you choose. Arcadia never moves or downloads ROMs." first>
+            <div className="mb-3 flex gap-2">
+              <Focusable
+                onActivate={() => addSource.mutate()}
+                ariaLabel="Add ROM folder"
+                className="inline-block rounded-xl bg-primary px-4 py-2 text-sm font-semibold text-black"
+              >
+                Add folder…
+              </Focusable>
+              <Focusable
+                onActivate={() => scan.mutate()}
+                ariaLabel="Scan library"
+                className="glass inline-block rounded-xl px-4 py-2 text-sm font-semibold"
+              >
+                {scan.isPending ? "Scanning…" : "Scan library"}
+              </Focusable>
+              <Focusable
+                onActivate={() => enrich.mutate()}
+                ariaLabel="Fetch box art"
+                className="glass inline-block rounded-xl px-4 py-2 text-sm font-semibold"
+              >
+                {enrich.isPending ? "Fetching box art…" : "Fetch box art"}
+              </Focusable>
+            </div>
+            <p className="mb-3 text-xs text-ink-dim">
+              Box art is pulled from the open libretro thumbnail archive (no account
+              needed) and cached locally. Text details (synopsis, genre, developer)
+              come from ScreenScraper when you add credentials in Metadata. Large
+              libraries take a while — watch the progress bar in the sidebar.
+            </p>
+            {(sources.data ?? []).length === 0 ? (
+              <p className="text-sm text-ink-dim">No folders added.</p>
+            ) : (
+              <ul className="flex flex-col gap-2">
+                {sources.data!.map((src) => (
+                  <li
+                    key={src.id}
+                    className="glass flex items-center gap-3 rounded-xl p-3 text-sm"
+                  >
+                    <span className="flex-1 truncate font-mono text-xs">{src.path}</span>
+                    <Focusable
+                      onActivate={() => removeSource.mutate(src.id)}
+                      ariaLabel="Remove folder"
+                      className="rounded-lg px-2 py-1 text-xs text-secondary"
+                    >
+                      Remove
+                    </Focusable>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </Panel>
+        )}
+
+        {tab === "emulators" && (
+          <>
+            <Panel title="Emulators" subtitle="Detected on this machine. Arcadia orchestrates them; it never reimplements emulation." first>
+              <Focusable
+                onActivate={() => detect.mutate()}
+                ariaLabel="Scan for emulators"
+                className="mb-3 inline-block rounded-xl bg-primary px-4 py-2 text-sm font-semibold text-black"
+              >
+                {detect.isPending ? "Scanning…" : "Scan for emulators"}
+              </Focusable>
+
+              {(emulators.data ?? []).length === 0 ? (
+                <p className="text-sm text-ink-dim">
+                  None detected yet. {adapters.data?.length ?? 0} adapters available
+                  (RetroArch + standalone). Install an emulator via pacman or Flatpak,
+                  then scan.
+                </p>
+              ) : (
+                <ul className="flex flex-col gap-2">
+                  {emulators.data!.map((e) => (
+                    <EmulatorRow key={e.id} e={e} />
+                  ))}
+                </ul>
+              )}
+            </Panel>
+
+            <Panel
+              title="Default Emulators"
+              subtitle="Pick which emulator launches each system. Auto follows Arcadia's recommended pick; a per-game override (on a game's page) still wins over these."
+            >
+              <DefaultEmulatorsPanel onToast={setToast} />
+            </Panel>
+          </>
+        )}
+
+        {tab === "metadata" && (
+          <Panel
+            title="Metadata Provider"
+            subtitle="ScreenScraper credentials are yours — Arcadia ships none. Used under your own rate quota to fetch synopsis, genre, developer, publisher, and release date. Leave blank to skip."
+            first
           >
-            {createProfile.isPending ? "Creating…" : "Create"}
-          </Focusable>
-        </div>
-      </Panel>
+            <ScreenScraperPanel onToast={setToast} />
+          </Panel>
+        )}
+
+        {tab === "accounts" && (
+          <>
+            <Panel
+              title="RetroAchievements"
+              subtitle="Your RA username and personal Web API key power the Achievement Hub. Arcadia ships no keys and only reads your progress. Leave blank to disable."
+              first
+            >
+              <RetroAchievementsPanel onToast={setToast} />
+            </Panel>
+
+            <Panel
+              title="Cloud Sync"
+              subtitle="Point Arcadia at a folder synced by Syncthing, Nextcloud, or similar. Arcadia mirrors save backups additively (never overwriting) and keeps both copies on a config conflict — it runs no sync daemon itself."
+            >
+              <SyncPanel onToast={setToast} />
+            </Panel>
+          </>
+        )}
+
+        {tab === "appearance" && (
+          <Panel title="Appearance" subtitle="Theme Engine — re-skins the whole interface instantly. Author your own or import a shared theme." first>
+            <ThemePanel themeId={themeId} onApply={setTheme} onToast={setToast} />
+          </Panel>
+        )}
+
+        {tab === "profiles" && (
+          <Panel title="Workspace Profile" subtitle="Each profile scopes its own ROM folders and library. Click to switch." first>
+            <div className="mb-3 flex flex-wrap gap-2">
+              {(profiles.data ?? []).map((p) => (
+                <Focusable
+                  key={p.id}
+                  onActivate={() => {
+                    if (p.id !== profileId) {
+                      setProfile(p.id);
+                      setToast(`Switched to "${p.name}".`);
+                    }
+                  }}
+                  ariaLabel={`Switch to ${p.name}`}
+                  className={`glass rounded-full px-3.5 py-1.5 text-xs font-semibold ${
+                    p.id === profileId ? "text-primary ring-1 ring-primary" : "text-ink-dim"
+                  }`}
+                >
+                  {p.name}
+                  {p.is_default ? " · default" : ""}
+                </Focusable>
+              ))}
+            </div>
+            <div className="glass flex max-w-sm gap-2 rounded-2xl p-3">
+              <input
+                value={newProfile}
+                onChange={(e) => setNewProfile(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && newProfile.trim())
+                    createProfile.mutate(newProfile.trim());
+                }}
+                placeholder="New profile name…"
+                className="flex-1 bg-transparent px-2 text-sm outline-none placeholder:text-ink-dim"
+              />
+              <Focusable
+                onActivate={() => newProfile.trim() && createProfile.mutate(newProfile.trim())}
+                ariaLabel="Create profile"
+                className="rounded-lg bg-primary px-4 py-1.5 text-sm font-semibold text-black"
+              >
+                {createProfile.isPending ? "Creating…" : "Create"}
+              </Focusable>
+            </div>
+          </Panel>
+        )}
+      </div>
     </div>
   );
 }
@@ -898,13 +950,17 @@ function Panel({
   title,
   subtitle,
   children,
+  first,
 }: {
   title: string;
   subtitle: string;
   children: React.ReactNode;
+  first?: boolean;
 }) {
   return (
-    <section className="mb-8 border-t border-primary/10 pt-6 first:border-t-0 first:pt-0">
+    <section
+      className={`mb-8 ${first ? "" : "border-t border-primary/10 pt-6"}`}
+    >
       <SectionHeader title={title} subtitle={subtitle} />
       {children}
     </section>

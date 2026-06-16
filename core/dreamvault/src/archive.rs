@@ -166,6 +166,19 @@ fn existing_launch_target(dir: &Path) -> Option<PathBuf> {
     pick_launch_target(&files)
 }
 
+/// The already-extracted launch target for an archive, if a prior launch left one
+/// on disk — *without* extracting. Savestate discovery uses this: an emulator that
+/// keys states by the ROM (beside it, or by its stem) writes them next to the
+/// *extracted* file in the cache and under the extracted file's *inner* name,
+/// which can differ from the archive's name (e.g. a `.zip` named "Kirby (U)" whose
+/// inner ROM is "0028 - Kirby - Canvas Curse"). Returns `None` for a ROM that was
+/// never extracted (no archive, or never launched), so callers fall back to the
+/// original path.
+pub(crate) fn existing_extraction(archive_path: &Path) -> Option<PathBuf> {
+    let dir = extract_base_dir().join(stable_dir_name(archive_path));
+    existing_launch_target(&dir)
+}
+
 /// Extract a compressed game to a fresh temp dir and pick the entry to boot.
 ///
 /// Dispatches on the archive format: `.7z` goes through the 7z decoder, anything

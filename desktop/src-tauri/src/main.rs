@@ -78,6 +78,23 @@ fn main() {
                 }
             });
 
+            // Forward background-job progress (library scan, box-art fetch) to
+            // the webview so the sidebar can show a live progress bar instead of
+            // a spinner that looks frozen on large libraries.
+            let mut prog_rx = app.state::<AppState>().engine.subscribe_progress();
+            let prog_handle = app.handle();
+            tauri::async_runtime::spawn(async move {
+                loop {
+                    match prog_rx.recv().await {
+                        Ok(ev) => {
+                            let _ = prog_handle.emit_all("arcadia://progress", ev);
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+            });
+
             // WebKitGTK doesn't reliably expose controllers to the webview, so
             // read them ourselves and push state to `navigator.getGamepads()`.
             gamepad::spawn(app.handle());

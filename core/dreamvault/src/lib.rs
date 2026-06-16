@@ -35,7 +35,7 @@ pub use paths::ArcadiaPaths;
 
 use adapters::AdapterRegistry;
 use db::Pool;
-use models::SessionEnded;
+use models::{ProgressEvent, SessionEnded};
 use tokio::sync::broadcast;
 
 /// The DreamVault engine. Cheap to clone where needed (the pool is an `Arc`),
@@ -48,6 +48,9 @@ pub struct Engine {
     /// asynchronously when an emulator exits; consumers (the Tauri shell)
     /// subscribe to refresh the UI without polling.
     pub(crate) session_tx: broadcast::Sender<SessionEnded>,
+    /// Fan-out of background-job progress (library scan, box-art fetch) so the
+    /// UI can render a live progress bar instead of a frozen spinner.
+    pub(crate) progress_tx: broadcast::Sender<ProgressEvent>,
 }
 
 impl Engine {
@@ -58,11 +61,13 @@ impl Engine {
         paths.ensure()?;
         let pool = db::connect(&paths.database_path()).await?;
         let (session_tx, _) = broadcast::channel(64);
+        let (progress_tx, _) = broadcast::channel(256);
         let engine = Self {
             pool,
             adapters: AdapterRegistry::builtin(),
             paths,
             session_tx,
+            progress_tx,
         };
         engine.ensure_platforms_seeded().await?;
         engine.ensure_default_profile().await?;
@@ -73,11 +78,13 @@ impl Engine {
     pub async fn with_pool(pool: Pool) -> Result<Self> {
         let paths = ArcadiaPaths::discover()?;
         let (session_tx, _) = broadcast::channel(64);
+        let (progress_tx, _) = broadcast::channel(256);
         let engine = Self {
             pool,
             adapters: AdapterRegistry::builtin(),
             paths,
             session_tx,
+            progress_tx,
         };
         engine.ensure_platforms_seeded().await?;
         engine.ensure_default_profile().await?;
@@ -108,6 +115,32 @@ impl Engine {
     /// to the webview when an emulator exits.
     pub fn subscribe_sessions(&self) -> broadcast::Receiver<SessionEnded> {
         self.session_tx.subscribe()
+    }
+
+    /// Subscribe to background-job progress events (library scan, box-art fetch).
+    pub fn subscribe_progress(&self) -> broadcast::Receiver<ProgressEvent> {
+        self.progress_tx.subscribe()
+    }
+
+    /// Emit a progress event. A send error just means no receiver is attached
+    /// (no UI listening) — progress is advisory, so we drop it silently.
+    pub(crate) fn emit_progress(
+        &self,
+        profile_id: &str,
+        kind: &str,
+        label: &str,
+        done: usize,
+        total: usize,
+        finished: bool,
+    ) {
+        let _ = self.progress_tx.send(ProgressEvent {
+            profile_id: profile_id.to_string(),
+            kind: kind.to_string(),
+            label: label.to_string(),
+            done,
+            total,
+            finished,
+        });
     }
 }
 
