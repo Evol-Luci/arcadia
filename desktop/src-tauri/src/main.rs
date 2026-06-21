@@ -121,6 +121,7 @@ fn main() {
             commands::list_games,
             commands::get_game,
             commands::set_favorite,
+            commands::set_custom_title,
             commands::set_game_emulator,
             commands::get_game_settings,
             commands::set_game_settings,

@@ -187,6 +187,18 @@ pub async fn set_favorite(
 }
 
 #[tauri::command]
+pub async fn set_custom_title(
+    state: State<'_, AppState>,
+    game_id: String,
+    title: Option<String>,
+) -> CmdResult<()> {
+    map(state
+        .engine
+        .set_custom_title(&game_id, title.as_deref())
+        .await)
+}
+
+#[tauri::command]
 pub async fn set_game_emulator(
     state: State<'_, AppState>,
     game_id: String,
