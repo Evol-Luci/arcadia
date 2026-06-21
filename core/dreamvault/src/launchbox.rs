@@ -67,9 +67,12 @@ pub(crate) fn arcadia_slug_for_launchbox(name: &str) -> Option<&'static str> {
 }
 
 use crate::error::Result;
+use crate::metadata::{MetadataPatch, MetadataProvider};
+use crate::models::Game;
+use async_trait::async_trait;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::SqlitePool;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use std::collections::HashMap;
@@ -296,6 +299,106 @@ pub(crate) async fn lookup_cover(pool: &SqlitePool, platform: &str, norm_name: &
         .flatten()
 }
 
+/// Percent-encode each path segment of a GameImage `FileName`, preserving `/`.
+fn image_url(file_name: &str) -> String {
+    let encoded: Vec<String> = file_name
+        .split('/')
+        .map(|seg| {
+            let mut out = String::with_capacity(seg.len());
+            for &b in seg.as_bytes() {
+                match b {
+                    b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
+                    _ => out.push_str(&format!("%{b:02X}")),
+                }
+            }
+            out
+        })
+        .collect();
+    format!("{}/{}", IMAGE_BASE, encoded.join("/"))
+}
+
+/// Cover provider backed by the sidecar index. Construct only when the index
+/// exists (see `Engine::launchbox_provider`).
+pub struct LaunchBoxProvider {
+    client: reqwest::Client,
+    cache_root: PathBuf,
+    pool: SqlitePool,
+}
+
+impl LaunchBoxProvider {
+    pub fn new(cache_root: PathBuf, pool: SqlitePool) -> Self {
+        let client = reqwest::Client::builder()
+            .user_agent("Arcadia/0.1 (+https://github.com/arcadia-project/arcadia)")
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .unwrap_or_default();
+        Self { client, cache_root, pool }
+    }
+
+    fn cache_path(&self, game: &Game, file_name: &str) -> PathBuf {
+        let stem = Path::new(&game.rom_path)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or(&game.title);
+        let safe: String = stem
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+            .collect();
+        let ext = Path::new(file_name)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("jpg")
+            .to_ascii_lowercase();
+        self.cache_root
+            .join("launchbox")
+            .join(&game.platform)
+            .join(format!("{safe}.{ext}"))
+    }
+}
+
+#[async_trait]
+impl MetadataProvider for LaunchBoxProvider {
+    fn id(&self) -> &'static str {
+        "launchbox"
+    }
+
+    async fn fetch(&self, game: &Game) -> Result<MetadataPatch> {
+        let mut patch = MetadataPatch::default();
+        let norm = normalize_name(&game.title);
+        let Some(file_name) = lookup_cover(&self.pool, &game.platform, &norm).await else {
+            return Ok(patch);
+        };
+
+        let cached = self.cache_path(game, &file_name);
+        if cached.is_file() {
+            patch.cover_art = Some(cached.to_string_lossy().to_string());
+            return Ok(patch);
+        }
+
+        let url = image_url(&file_name);
+        let resp = match self.client.get(&url).send().await {
+            Ok(r) if r.status().is_success() => r,
+            Ok(r) => {
+                tracing::debug!(%url, status = %r.status(), "launchbox image miss");
+                return Ok(patch);
+            }
+            Err(e) => {
+                tracing::debug!(%url, error = %e, "launchbox image request failed");
+                return Ok(patch);
+            }
+        };
+        let Ok(bytes) = resp.bytes().await else { return Ok(patch) };
+        if let Some(parent) = cached.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if std::fs::write(&cached, &bytes).is_ok() {
+            tracing::info!(game = %game.title, "fetched box art from launchbox");
+            patch.cover_art = Some(cached.to_string_lossy().to_string());
+        }
+        Ok(patch)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -372,6 +475,14 @@ mod tests {
 
         // Exactly two rows (main + alt), no screenshot, no Pico.
         assert_eq!(rows.len(), 2);
+    }
+
+    #[test]
+    fn image_url_percent_encodes_segments_but_keeps_slashes() {
+        assert_eq!(
+            image_url("a/b/Super Mario World-NA.jpg"),
+            "https://images.launchbox-app.com/a/b/Super%20Mario%20World-NA.jpg"
+        );
     }
 
     #[tokio::test]
