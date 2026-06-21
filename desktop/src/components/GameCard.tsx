@@ -2,6 +2,7 @@ import { Focusable } from "./Focusable";
 import { artworkUrl } from "../api/commands";
 import { useStore } from "../store/useStore";
 import { platformShort, formatPlaytime } from "../lib/platforms";
+import { displayTitle } from "../lib/game";
 import type { Game } from "../api/types";
 
 interface Props {
@@ -14,7 +15,7 @@ export function GameCard({ game, onOpen }: Props) {
   const cover = artworkUrl(game.cover_art, coverVersion);
   return (
     <Focusable
-      ariaLabel={game.title}
+      ariaLabel={displayTitle(game)}
       onActivate={() => onOpen(game.id)}
       className="glass rounded-2xl overflow-hidden w-[180px] shrink-0"
     >
@@ -22,7 +23,7 @@ export function GameCard({ game, onOpen }: Props) {
         {cover ? (
           <img
             src={cover}
-            alt={game.title}
+            alt={displayTitle(game)}
             className="h-full w-full object-contain"
             draggable={false}
             loading="lazy"
@@ -45,7 +46,7 @@ export function GameCard({ game, onOpen }: Props) {
         </div>
       </div>
       <div className="p-2.5">
-        <div className="truncate text-sm font-semibold">{game.title}</div>
+        <div className="truncate text-sm font-semibold">{displayTitle(game)}</div>
         <div className="mt-0.5 text-[11px] text-ink-dim">
           {formatPlaytime(game.playtime_minutes)}
         </div>

@@ -49,6 +49,7 @@ export interface Game {
   id: string;
   profile_id: string;
   title: string;
+  custom_title: string | null;
   sort_title: string;
   platform: string;
   rom_path: string;

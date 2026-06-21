@@ -80,6 +80,8 @@ export const api = {
   getGame: (id: string) => invoke<Game | null>("get_game", { id }),
   setFavorite: (gameId: string, favorite: boolean) =>
     invoke<void>("set_favorite", { gameId, favorite }),
+  setCustomTitle: (gameId: string, title: string | null) =>
+    invoke<void>("set_custom_title", { gameId, title }),
   setGameEmulator: (gameId: string, emulatorId: string | null) =>
     invoke<void>("set_game_emulator", { gameId, emulatorId }),
   getGameSettings: (gameId: string) =>
