@@ -66,6 +66,178 @@ pub(crate) fn arcadia_slug_for_launchbox(name: &str) -> Option<&'static str> {
     })
 }
 
+use std::collections::HashMap;
+
+#[derive(Debug, Clone)]
+pub(crate) struct IndexRow {
+    pub platform: String,
+    pub norm_name: String,
+    pub file_name: String,
+}
+
+/// Region preference for choosing among multiple "Box - Front" images of one
+/// game. Higher wins; first-seen wins ties.
+fn region_score(region: &str) -> i32 {
+    match region {
+        "North America" => 4,
+        "World" => 3,
+        "Europe" => 2,
+        "Japan" => 1,
+        _ => 0,
+    }
+}
+
+#[derive(PartialEq)]
+enum Section {
+    None,
+    Game,
+    Alt,
+    Image,
+}
+
+/// Stream-parse a LaunchBox `Metadata.xml` into index rows. Only games on a
+/// platform Arcadia tracks and with a "Box - Front" image are emitted. Memory
+/// is bounded by the catalogue of supported platforms, not the file size.
+pub(crate) fn parse_metadata_xml<R: std::io::BufRead>(reader: R) -> Vec<IndexRow> {
+    use quick_xml::events::Event;
+    let mut xml = quick_xml::Reader::from_reader(reader);
+    let mut buf = Vec::new();
+
+    let mut section = Section::None;
+    let mut field = String::new();
+
+    // Per-record scratch.
+    let (mut g_id, mut g_name, mut g_platform) = (String::new(), String::new(), String::new());
+    let (mut a_id, mut a_name) = (String::new(), String::new());
+    let (mut i_id, mut i_file, mut i_type, mut i_region) =
+        (String::new(), String::new(), String::new(), String::new());
+
+    // db_id -> arcadia slug (only supported platforms)
+    let mut game_platform: HashMap<String, String> = HashMap::new();
+    // db_id -> set of normalized names (primary + alternates)
+    let mut game_names: HashMap<String, Vec<String>> = HashMap::new();
+    // db_id -> (best file_name, best score) for Box - Front
+    let mut box_front: HashMap<String, (String, i32)> = HashMap::new();
+
+    loop {
+        match xml.read_event_into(&mut buf) {
+            Ok(Event::Start(e)) => {
+                let name = e.name();
+                let tag = String::from_utf8_lossy(name.as_ref()).to_string();
+                match tag.as_str() {
+                    "Game" => {
+                        section = Section::Game;
+                        g_id.clear(); g_name.clear(); g_platform.clear();
+                    }
+                    "GameAlternateName" => {
+                        section = Section::Alt;
+                        a_id.clear(); a_name.clear();
+                    }
+                    "GameImage" => {
+                        section = Section::Image;
+                        i_id.clear(); i_file.clear(); i_type.clear(); i_region.clear();
+                    }
+                    _ => field = tag,
+                }
+            }
+            Ok(Event::Text(t)) => {
+                let text = t.unescape().unwrap_or_default().to_string();
+                match section {
+                    Section::Game => match field.as_str() {
+                        "DatabaseID" => g_id.push_str(&text),
+                        "Name" => g_name.push_str(&text),
+                        "Platform" => g_platform.push_str(&text),
+                        _ => {}
+                    },
+                    Section::Alt => match field.as_str() {
+                        "DatabaseID" => a_id.push_str(&text),
+                        "AlternateName" => a_name.push_str(&text),
+                        _ => {}
+                    },
+                    Section::Image => match field.as_str() {
+                        "DatabaseID" => i_id.push_str(&text),
+                        "FileName" => i_file.push_str(&text),
+                        "Type" => i_type.push_str(&text),
+                        "Region" => i_region.push_str(&text),
+                        _ => {}
+                    },
+                    Section::None => {}
+                }
+            }
+            Ok(Event::End(e)) => {
+                let name = e.name();
+                let tag = String::from_utf8_lossy(name.as_ref()).to_string();
+                match tag.as_str() {
+                    "Game" => {
+                        if let Some(slug) = arcadia_slug_for_launchbox(g_platform.trim()) {
+                            if !g_id.is_empty() && !g_name.trim().is_empty() {
+                                game_platform.insert(g_id.clone(), slug.to_string());
+                                game_names
+                                    .entry(g_id.clone())
+                                    .or_default()
+                                    .push(normalize_name(&g_name));
+                            }
+                        }
+                        section = Section::None;
+                    }
+                    "GameAlternateName" => {
+                        if !a_id.is_empty() && !a_name.trim().is_empty() {
+                            game_names
+                                .entry(a_id.clone())
+                                .or_default()
+                                .push(normalize_name(&a_name));
+                        }
+                        section = Section::None;
+                    }
+                    "GameImage" => {
+                        if i_type.trim() == "Box - Front" && !i_id.is_empty() && !i_file.trim().is_empty() {
+                            let score = region_score(i_region.trim());
+                            let better = match box_front.get(&i_id) {
+                                Some((_, best)) => score > *best,
+                                None => true,
+                            };
+                            if better {
+                                box_front.insert(i_id.clone(), (i_file.trim().to_string(), score));
+                            }
+                        }
+                        section = Section::None;
+                    }
+                    _ => field.clear(),
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(e) => {
+                tracing::warn!(error = %e, "launchbox metadata parse error; stopping");
+                break;
+            }
+            _ => {}
+        }
+        buf.clear();
+    }
+
+    // Join games (with their platform + names) against the chosen box-front.
+    let mut rows = Vec::new();
+    let mut seen: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
+    for (id, platform) in &game_platform {
+        let Some((file_name, _)) = box_front.get(id) else { continue };
+        let Some(names) = game_names.get(id) else { continue };
+        for norm in names {
+            if norm.is_empty() {
+                continue;
+            }
+            let key = (platform.clone(), norm.clone());
+            if seen.insert(key) {
+                rows.push(IndexRow {
+                    platform: platform.clone(),
+                    norm_name: norm.clone(),
+                    file_name: file_name.clone(),
+                });
+            }
+        }
+    }
+    rows
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -82,5 +254,65 @@ mod tests {
         assert_eq!(arcadia_slug_for_launchbox("Super Nintendo Entertainment System"), Some("snes"));
         assert_eq!(arcadia_slug_for_launchbox("Sony Playstation"), Some("ps1"));
         assert_eq!(arcadia_slug_for_launchbox("Sega Pico"), None);
+    }
+
+    const SAMPLE_XML: &str = r#"<?xml version="1.0"?>
+<LaunchBox>
+  <Game>
+    <Name>Super Mario World</Name>
+    <DatabaseID>10</DatabaseID>
+    <Platform>Super Nintendo Entertainment System</Platform>
+  </Game>
+  <Game>
+    <Name>Sega Pico Game</Name>
+    <DatabaseID>20</DatabaseID>
+    <Platform>Sega Pico</Platform>
+  </Game>
+  <GameAlternateName>
+    <AlternateName>Super Mario Bros 4</AlternateName>
+    <DatabaseID>10</DatabaseID>
+  </GameAlternateName>
+  <GameImage>
+    <DatabaseID>10</DatabaseID>
+    <FileName>a/b/Super Mario World-01.jpg</FileName>
+    <Type>Box - Front</Type>
+    <Region>Japan</Region>
+  </GameImage>
+  <GameImage>
+    <DatabaseID>10</DatabaseID>
+    <FileName>a/b/Super Mario World-NA.jpg</FileName>
+    <Type>Box - Front</Type>
+    <Region>North America</Region>
+  </GameImage>
+  <GameImage>
+    <DatabaseID>10</DatabaseID>
+    <FileName>a/b/Super Mario World-screen.jpg</FileName>
+    <Type>Screenshot - Gameplay</Type>
+    <Region>North America</Region>
+  </GameImage>
+  <GameImage>
+    <DatabaseID>20</DatabaseID>
+    <FileName>x/y/pico-01.jpg</FileName>
+    <Type>Box - Front</Type>
+    <Region>Japan</Region>
+  </GameImage>
+</LaunchBox>"#;
+
+    #[test]
+    fn parse_picks_box_front_prefers_na_and_includes_alt_names() {
+        let mut rows = parse_metadata_xml(std::io::Cursor::new(SAMPLE_XML));
+        rows.sort_by(|a, b| (a.platform.clone(), a.norm_name.clone()).cmp(&(b.platform.clone(), b.norm_name.clone())));
+
+        // Sega Pico is unmapped -> dropped entirely (no rows for db 20).
+        assert!(rows.iter().all(|r| r.platform == "snes"));
+
+        // Both the primary name and the alternate name map to the NA box-front.
+        let main = rows.iter().find(|r| r.norm_name == "super mario world").unwrap();
+        assert_eq!(main.file_name, "a/b/Super Mario World-NA.jpg");
+        let alt = rows.iter().find(|r| r.norm_name == "super mario bros 4").unwrap();
+        assert_eq!(alt.file_name, "a/b/Super Mario World-NA.jpg");
+
+        // Exactly two rows (main + alt), no screenshot, no Pico.
+        assert_eq!(rows.len(), 2);
     }
 }
