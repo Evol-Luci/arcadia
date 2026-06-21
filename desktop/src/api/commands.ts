@@ -20,6 +20,7 @@ import type {
   GameSettings,
   HidapiStatus,
   HidapiWorkaround,
+  LaunchBoxConfig,
   LaunchResult,
   LibraryStats,
   PlatformEmulators,
@@ -74,6 +75,10 @@ export const api = {
     invoke<ScreenScraperCredentials>("screenscraper_credentials"),
   setScreenScraperCredentials: (credentials: ScreenScraperCredentials) =>
     invoke<void>("set_screenscraper_credentials", { credentials }),
+  launchBoxConfig: () => invoke<LaunchBoxConfig>("launchbox_config"),
+  setLaunchBoxEnabled: (enabled: boolean) =>
+    invoke<void>("set_launchbox_enabled", { enabled }),
+  refreshLaunchBoxIndex: () => invoke<number>("refresh_launchbox_index"),
 
   // Games
   listGames: (query: GameQuery) => invoke<Game[]>("list_games", { query }),

@@ -242,13 +242,21 @@ export function Settings({ profileId }: { profileId: string }) {
         )}
 
         {tab === "metadata" && (
-          <Panel
-            title="Metadata Provider"
-            subtitle="ScreenScraper credentials are yours — Arcadia ships none. Used under your own rate quota to fetch synopsis, genre, developer, publisher, and release date. Leave blank to skip."
-            first
-          >
-            <ScreenScraperPanel onToast={setToast} />
-          </Panel>
+          <>
+            <Panel
+              title="Metadata Provider"
+              subtitle="ScreenScraper credentials are yours — Arcadia ships none. Used under your own rate quota to fetch synopsis, genre, developer, publisher, and release date. Leave blank to skip."
+              first
+            >
+              <ScreenScraperPanel onToast={setToast} />
+            </Panel>
+            <Panel
+              title="LaunchBox Games Database"
+              subtitle="Optional fallback source for cover art when the primary source has no match."
+            >
+              <LaunchBoxPanel onToast={setToast} />
+            </Panel>
+          </>
         )}
 
         {tab === "accounts" && (
@@ -509,6 +517,69 @@ function ScreenScraperPanel({ onToast }: { onToast: (msg: string) => void }) {
         A developer ID/password (issued by ScreenScraper) is required; a personal
         account is optional but raises your quota. Stored locally in your config
         directory — never shared.
+      </p>
+    </div>
+  );
+}
+
+function LaunchBoxPanel({ onToast }: { onToast: (msg: string) => void }) {
+  const config = useQuery({
+    queryKey: ["launchbox-config"],
+    queryFn: () => api.launchBoxConfig(),
+  });
+  const qc = useQueryClient();
+
+  const setEnabled = useMutation({
+    mutationFn: (enabled: boolean) => api.setLaunchBoxEnabled(enabled),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["launchbox-config"] });
+    },
+    onError: (e: unknown) => onToast(`Couldn't update setting: ${String(e)}`),
+  });
+
+  const refresh = useMutation({
+    mutationFn: () => api.refreshLaunchBoxIndex(),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["launchbox-config"] });
+      onToast("LaunchBox database updated successfully.");
+    },
+    onError: (e: unknown) => onToast(`Couldn't refresh database: ${String(e)}`),
+  });
+
+  return (
+    <div className="flex max-w-md flex-col gap-3">
+      <label className="flex items-center gap-2">
+        <input
+          type="checkbox"
+          checked={config.data?.enabled ?? false}
+          onChange={(e) => setEnabled.mutate(e.target.checked)}
+          className="rounded"
+        />
+        <span className="text-sm">Enable LaunchBox covers</span>
+      </label>
+
+      <Focusable
+        onActivate={() => refresh.mutate()}
+        ariaLabel="Refresh LaunchBox database"
+        className={`self-start rounded-xl px-4 py-2 text-sm font-semibold ${
+          refresh.isPending || !config.data?.enabled
+            ? "bg-surface-2 text-ink-dim cursor-not-allowed"
+            : "bg-primary text-black"
+        }`}
+      >
+        {refresh.isPending ? "Downloading…" : "Refresh database (several hundred MB)"}
+      </Focusable>
+
+      {config.data?.last_refresh ? (
+        <p className="text-sm text-ink-dim">
+          Last updated: {new Date(config.data.last_refresh * 1000).toLocaleString()}
+        </p>
+      ) : null}
+
+      <p className="text-[11px] leading-snug text-ink-dim/80">
+        Optional fallback source for box-art covers, used only for games the primary
+        source can't match. Enabling it does nothing until you download the catalogue
+        below — a one-time download of several hundred megabytes.
       </p>
     </div>
   );

@@ -167,6 +167,11 @@ export interface ScreenScraperCredentials {
   user_password: string;
 }
 
+export interface LaunchBoxConfig {
+  enabled: boolean;
+  last_refresh: number | null;
+}
+
 export interface Screenshot {
   id: string;
   game_id: string;
