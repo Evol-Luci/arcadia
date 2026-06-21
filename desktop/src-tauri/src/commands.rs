@@ -5,8 +5,8 @@
 use dreamvault::achievements::{RaGameCandidate, RaGameProgress, RaUserSummary};
 use dreamvault::adapters::AdapterDescriptor;
 use dreamvault::config::{
-    ControllerConfig, ControllerProfile, HidapiWorkaround, RetroAchievementsCredentials,
-    ScreenScraperCredentials, SyncConfig, SystemControllerProfile,
+    ControllerConfig, ControllerProfile, HidapiWorkaround, LaunchBoxConfig,
+    RetroAchievementsCredentials, ScreenScraperCredentials, SyncConfig, SystemControllerProfile,
 };
 use dreamvault::console_pads::ConsolePad;
 use dreamvault::controller::{ApplyOutcome, HidapiStatus, MaterializePreview};
@@ -163,6 +163,27 @@ pub fn set_screenscraper_credentials(
     let mut cfg = state.engine.load_config();
     cfg.screenscraper = credentials;
     map(state.engine.save_config(&cfg))
+}
+
+/// The user's LaunchBox cover settings (enable flag + last refresh time).
+#[tauri::command]
+pub fn launchbox_config(state: State<'_, AppState>) -> LaunchBoxConfig {
+    state.engine.load_config().launchbox
+}
+
+/// Toggle the LaunchBox cover source on/off. Does not download anything.
+#[tauri::command]
+pub fn set_launchbox_enabled(state: State<'_, AppState>, enabled: bool) -> CmdResult<()> {
+    let mut cfg = state.engine.load_config();
+    cfg.launchbox.enabled = enabled;
+    map(state.engine.save_config(&cfg))
+}
+
+/// Download the LaunchBox metadata dump and rebuild the cover index. Heavy
+/// (hundreds of MB). Returns the number of indexed entries.
+#[tauri::command]
+pub async fn refresh_launchbox_index(state: State<'_, AppState>) -> CmdResult<usize> {
+    map(state.engine.refresh_launchbox_index().await)
 }
 
 // ---- Games ----------------------------------------------------------------
