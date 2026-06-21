@@ -14,6 +14,9 @@ pub enum EngineError {
     #[error("serialization error: {0}")]
     Serde(#[from] serde_json::Error),
 
+    #[error("http error: {0}")]
+    Http(#[from] reqwest::Error),
+
     #[error("could not resolve XDG base directories")]
     NoBaseDirs,
 

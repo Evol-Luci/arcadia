@@ -69,6 +69,7 @@ pub(crate) fn arcadia_slug_for_launchbox(name: &str) -> Option<&'static str> {
 use crate::error::Result;
 use crate::metadata::{MetadataPatch, MetadataProvider};
 use crate::models::Game;
+use crate::Engine;
 use async_trait::async_trait;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::SqlitePool;
@@ -396,6 +397,77 @@ impl MetadataProvider for LaunchBoxProvider {
             patch.cover_art = Some(cached.to_string_lossy().to_string());
         }
         Ok(patch)
+    }
+}
+
+impl Engine {
+    /// Path to the sidecar cover index.
+    pub fn launchbox_index_path(&self) -> PathBuf {
+        self.paths.artwork_dir().join("launchbox").join("index.sqlite")
+    }
+
+    /// Download the LaunchBox metadata dump, rebuild the sidecar index, and
+    /// record the refresh time. This is the ONLY code path that downloads the
+    /// dump. Returns the number of indexed (platform, name) entries.
+    pub async fn refresh_launchbox_index(&self) -> Result<usize> {
+        let index_path = self.launchbox_index_path();
+        let dir = index_path.parent().unwrap().to_path_buf();
+        std::fs::create_dir_all(&dir)?;
+
+        // 1. Stream the (hundreds of MB) zip to a temp file on disk — the zip
+        //    central directory is at the end, so we need Seek to read entries.
+        tracing::info!("downloading LaunchBox metadata dump");
+        let client = reqwest::Client::builder()
+            .user_agent("Arcadia/0.1 (+https://github.com/arcadia-project/arcadia)")
+            .build()
+            .unwrap_or_default();
+        let resp = client.get(METADATA_URL).send().await?.error_for_status()?;
+        let bytes = resp.bytes().await?;
+        let mut zip_tmp = tempfile::Builder::new().prefix("launchbox-").suffix(".zip").tempfile_in(&dir)?;
+        std::io::Write::write_all(&mut zip_tmp, &bytes)?;
+        drop(bytes);
+
+        // 2. Stream-parse Metadata.xml out of the zip (never load it whole).
+        let rows = {
+            let file = zip_tmp.reopen()?;
+            let mut archive = zip::ZipArchive::new(file)
+                .map_err(|e| crate::error::EngineError::Invalid(format!("launchbox zip: {e}")))?;
+            let entry = archive
+                .by_name("Metadata.xml")
+                .map_err(|e| crate::error::EngineError::Invalid(format!("Metadata.xml missing: {e}")))?;
+            parse_metadata_xml(std::io::BufReader::new(entry))
+        };
+        drop(zip_tmp); // deletes the temp zip
+        tracing::info!(rows = rows.len(), "parsed LaunchBox metadata");
+
+        // 3. Build into a temp sidecar, then atomically swap into place so a
+        //    failed/partial build never replaces a working index.
+        let build_tmp = index_path.with_extension("sqlite.tmp");
+        let count = build_index_db(&build_tmp, &rows).await?;
+        std::fs::rename(&build_tmp, &index_path)?;
+
+        // 4. Record the refresh timestamp.
+        let mut cfg = self.load_config();
+        cfg.launchbox.last_refresh = Some(chrono::Utc::now().timestamp());
+        let _ = self.save_config(&cfg);
+
+        tracing::info!(count, "LaunchBox index rebuilt");
+        Ok(count)
+    }
+
+    /// Build a provider if the feature is enabled AND an index already exists.
+    /// Never downloads — returns `None` if the user hasn't refreshed yet.
+    pub(crate) async fn launchbox_provider(&self) -> Option<LaunchBoxProvider> {
+        if !self.load_config().launchbox.is_enabled() {
+            return None;
+        }
+        let index_path = self.launchbox_index_path();
+        if !index_path.is_file() {
+            tracing::debug!("launchbox enabled but no index built yet; skipping");
+            return None;
+        }
+        let pool = open_index_pool(&index_path).await.ok()?;
+        Some(LaunchBoxProvider::new(self.paths.artwork_dir(), pool))
     }
 }
 
