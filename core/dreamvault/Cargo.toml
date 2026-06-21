@@ -25,6 +25,7 @@ walkdir.workspace = true
 async-trait.workspace = true
 reqwest.workspace = true
 zip.workspace = true
+quick-xml.workspace = true
 tempfile.workspace = true
 # Pure-Rust WebAssembly interpreter for the community plugin sandbox. No WASI,
 # no host imports are linked, so plugins cannot touch the filesystem, network,

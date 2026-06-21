@@ -32,4 +32,7 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 # natively. Pure-Rust deflate backend only (no C codecs): we never write zips,
 # only extract STORED/DEFLATE entries to a temp dir at launch.
 zip = { version = "2", default-features = false, features = ["deflate"] }
+# Streaming XML reader for the LaunchBox metadata dump (multi-GB; must not be
+# loaded whole into memory). Pure Rust, no C codecs.
+quick-xml = "0.36"
 tempfile = "3"

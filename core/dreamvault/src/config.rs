@@ -21,6 +21,8 @@ pub struct AppConfig {
     pub controller: ControllerConfig,
     #[serde(default)]
     pub sync: SyncConfig,
+    #[serde(default)]
+    pub launchbox: LaunchBoxConfig,
     /// Ids of community plugins the user has explicitly enabled. Plugins are
     /// disabled until opted-in (sandboxed, but opt-in is a clear trust gate).
     #[serde(default)]
@@ -162,6 +164,23 @@ impl ScreenScraperCredentials {
     }
 }
 
+/// LaunchBox Games Database cover source. Opt-in: disabled until the user
+/// enables it and explicitly downloads the catalogue. `last_refresh` is the
+/// unix-seconds timestamp of the last successful index build (None = never).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LaunchBoxConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub last_refresh: Option<i64>,
+}
+
+impl LaunchBoxConfig {
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+}
+
 impl AppConfig {
     fn file_path(config_dir: &Path) -> PathBuf {
         config_dir.join(CONFIG_FILE)
@@ -225,5 +244,20 @@ mod tests {
         c.dev_id = "d".into();
         c.dev_password = "p".into();
         assert!(c.is_configured());
+    }
+
+    #[test]
+    fn launchbox_config_defaults_disabled_and_round_trips() {
+        let dir = std::env::temp_dir().join(format!("arcadia_cfg_lb_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut cfg = AppConfig::default();
+        assert!(!cfg.launchbox.is_enabled());
+        cfg.launchbox.enabled = true;
+        cfg.launchbox.last_refresh = Some(1_700_000_000);
+        cfg.save(&dir).unwrap();
+        let loaded = AppConfig::load(&dir);
+        assert!(loaded.launchbox.is_enabled());
+        assert_eq!(loaded.launchbox.last_refresh, Some(1_700_000_000));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
