@@ -389,7 +389,8 @@ impl Engine {
 
         stats.most_played = sqlx::query_as::<_, GamePlaytime>(
             r#"
-            SELECT id, title, platform, cover_art, playtime_minutes, launch_count, last_played
+            SELECT id, COALESCE(NULLIF(custom_title, ''), title) AS title,
+                   platform, cover_art, playtime_minutes, launch_count, last_played
             FROM games
             WHERE profile_id = ? AND playtime_minutes > 0
             ORDER BY playtime_minutes DESC
@@ -402,7 +403,8 @@ impl Engine {
 
         stats.recently_played = sqlx::query_as::<_, GamePlaytime>(
             r#"
-            SELECT id, title, platform, cover_art, playtime_minutes, launch_count, last_played
+            SELECT id, COALESCE(NULLIF(custom_title, ''), title) AS title,
+                   platform, cover_art, playtime_minutes, launch_count, last_played
             FROM games
             WHERE profile_id = ? AND last_played IS NOT NULL
             ORDER BY last_played DESC

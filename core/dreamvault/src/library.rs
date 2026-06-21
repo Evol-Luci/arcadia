@@ -1292,4 +1292,24 @@ mod tests {
         assert_eq!(row.2, "SLU1654"); // derived title still refreshed
         assert_eq!(row.3, 456); // other derived fields still refreshed
     }
+
+    #[tokio::test]
+    async fn stats_most_played_uses_custom_title() {
+        let pool = db::connect_in_memory().await.unwrap();
+        let engine = Engine::with_pool(pool).await.unwrap();
+        let profile = engine.ensure_default_profile().await.unwrap();
+
+        sqlx::query(
+            "INSERT INTO games (id, profile_id, title, sort_title, platform, rom_path, playtime_minutes, added_at)
+             VALUES ('g1', ?, 'SLU1654', 'slu1654', 'ps2', '/roms/ps2/SLU1654.iso', 120, '2026-01-01T00:00:00Z')",
+        )
+        .bind(&profile.id)
+        .execute(&engine.pool)
+        .await
+        .unwrap();
+        engine.set_custom_title("g1", Some("Final Fantasy X")).await.unwrap();
+
+        let stats = engine.library_stats(&profile.id).await.unwrap();
+        assert_eq!(stats.most_played[0].title, "Final Fantasy X");
+    }
 }
