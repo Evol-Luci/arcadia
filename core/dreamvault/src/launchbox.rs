@@ -66,6 +66,12 @@ pub(crate) fn arcadia_slug_for_launchbox(name: &str) -> Option<&'static str> {
     })
 }
 
+use crate::error::Result;
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+use sqlx::SqlitePool;
+use std::path::Path;
+use std::str::FromStr;
+
 use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
@@ -238,6 +244,58 @@ pub(crate) fn parse_metadata_xml<R: std::io::BufRead>(reader: R) -> Vec<IndexRow
     rows
 }
 
+/// Build a fresh sidecar index at `db_path`, replacing any existing file.
+/// Journal mode is DELETE so the index is a single file the caller can rename
+/// atomically. Returns the number of rows inserted.
+pub(crate) async fn build_index_db(db_path: &Path, rows: &[IndexRow]) -> Result<usize> {
+    // Start clean so a rebuild never merges into stale data.
+    let _ = std::fs::remove_file(db_path);
+    let opts = SqliteConnectOptions::from_str(&format!("sqlite://{}", db_path.display()))
+        .map_err(|e| crate::error::EngineError::Invalid(format!("launchbox index path: {e}")))?
+        .create_if_missing(true)
+        .journal_mode(sqlx::sqlite::SqliteJournalMode::Delete);
+    let pool = SqlitePoolOptions::new().max_connections(1).connect_with(opts).await?;
+
+    sqlx::query("CREATE TABLE covers (platform TEXT NOT NULL, norm_name TEXT NOT NULL, file_name TEXT NOT NULL, PRIMARY KEY (platform, norm_name))")
+        .execute(&pool)
+        .await?;
+
+    let mut tx = pool.begin().await?;
+    let mut inserted = 0usize;
+    for row in rows {
+        let res = sqlx::query("INSERT OR IGNORE INTO covers (platform, norm_name, file_name) VALUES (?, ?, ?)")
+            .bind(&row.platform)
+            .bind(&row.norm_name)
+            .bind(&row.file_name)
+            .execute(&mut *tx)
+            .await?;
+        inserted += res.rows_affected() as usize;
+    }
+    tx.commit().await?;
+    pool.close().await;
+    Ok(inserted)
+}
+
+/// Open a read-only pool against an existing sidecar index.
+pub(crate) async fn open_index_pool(db_path: &Path) -> Result<SqlitePool> {
+    let opts = SqliteConnectOptions::from_str(&format!("sqlite://{}", db_path.display()))
+        .map_err(|e| crate::error::EngineError::Invalid(format!("launchbox index path: {e}")))?
+        .read_only(true);
+    let pool = SqlitePoolOptions::new().max_connections(2).connect_with(opts).await?;
+    Ok(pool)
+}
+
+/// Look up the stored image file path for a (platform, normalized name) key.
+pub(crate) async fn lookup_cover(pool: &SqlitePool, platform: &str, norm_name: &str) -> Option<String> {
+    sqlx::query_scalar::<_, String>("SELECT file_name FROM covers WHERE platform = ? AND norm_name = ?")
+        .bind(platform)
+        .bind(norm_name)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -314,5 +372,28 @@ mod tests {
 
         // Exactly two rows (main + alt), no screenshot, no Pico.
         assert_eq!(rows.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn index_build_and_lookup_roundtrip() {
+        let dir = std::env::temp_dir().join(format!("arcadia_lb_idx_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("index.sqlite");
+
+        let rows = vec![
+            IndexRow { platform: "snes".into(), norm_name: "super mario world".into(), file_name: "a/b/smw.jpg".into() },
+            IndexRow { platform: "snes".into(), norm_name: "super mario bros 4".into(), file_name: "a/b/smw.jpg".into() },
+        ];
+        let n = build_index_db(&db, &rows).await.unwrap();
+        assert_eq!(n, 2);
+
+        let pool = open_index_pool(&db).await.unwrap();
+        assert_eq!(lookup_cover(&pool, "snes", "super mario world").await.as_deref(), Some("a/b/smw.jpg"));
+        assert_eq!(lookup_cover(&pool, "snes", "super mario bros 4").await.as_deref(), Some("a/b/smw.jpg"));
+        assert_eq!(lookup_cover(&pool, "snes", "unknown game").await, None);
+        assert_eq!(lookup_cover(&pool, "n64", "super mario world").await, None);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
