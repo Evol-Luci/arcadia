@@ -1016,6 +1016,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn new_games_have_no_custom_title() {
+        let pool = db::connect_in_memory().await.unwrap();
+        let engine = Engine::with_pool(pool).await.unwrap();
+        let profile = engine.ensure_default_profile().await.unwrap();
+
+        sqlx::query(
+            "INSERT INTO games (id, profile_id, title, sort_title, platform, rom_path, added_at)
+             VALUES ('g1', ?, 'Mario', 'mario', 'snes', '/roms/snes/Mario.sfc', '2026-01-01T00:00:00Z')",
+        )
+        .bind(&profile.id)
+        .execute(&engine.pool)
+        .await
+        .unwrap();
+
+        let game = engine.get_game("g1").await.unwrap().unwrap();
+        assert_eq!(game.custom_title, None);
+    }
+
+    #[tokio::test]
     async fn remove_rom_source_deletes_only_games_under_that_folder() {
         let pool = db::connect_in_memory().await.unwrap();
         let engine = Engine::with_pool(pool).await.unwrap();

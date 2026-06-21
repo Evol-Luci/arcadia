@@ -84,6 +84,9 @@ pub struct Game {
     pub id: String,
     pub profile_id: String,
     pub title: String,
+    /// User override for the displayed name. NULL when unset; display falls
+    /// back to `title`. Set/cleared via `Engine::set_custom_title`.
+    pub custom_title: Option<String>,
     pub sort_title: String,
     pub platform: String,
     pub rom_path: String,
