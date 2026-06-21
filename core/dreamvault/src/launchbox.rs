@@ -411,21 +411,26 @@ impl Engine {
     /// dump. Returns the number of indexed (platform, name) entries.
     pub async fn refresh_launchbox_index(&self) -> Result<usize> {
         let index_path = self.launchbox_index_path();
-        let dir = index_path.parent().unwrap().to_path_buf();
+        let dir = index_path
+            .parent()
+            .expect("launchbox index path always has a parent dir")
+            .to_path_buf();
         std::fs::create_dir_all(&dir)?;
 
-        // 1. Stream the (hundreds of MB) zip to a temp file on disk — the zip
+        // 1. Stream the (hundreds of MB) zip to a temp file on disk, chunk by
+        //    chunk, so the whole dump is never held in memory at once. The zip
         //    central directory is at the end, so we need Seek to read entries.
         tracing::info!("downloading LaunchBox metadata dump");
         let client = reqwest::Client::builder()
             .user_agent("Arcadia/0.1 (+https://github.com/arcadia-project/arcadia)")
             .build()
             .unwrap_or_default();
-        let resp = client.get(METADATA_URL).send().await?.error_for_status()?;
-        let bytes = resp.bytes().await?;
+        let mut resp = client.get(METADATA_URL).send().await?.error_for_status()?;
         let mut zip_tmp = tempfile::Builder::new().prefix("launchbox-").suffix(".zip").tempfile_in(&dir)?;
-        std::io::Write::write_all(&mut zip_tmp, &bytes)?;
-        drop(bytes);
+        while let Some(chunk) = resp.chunk().await? {
+            std::io::Write::write_all(&mut zip_tmp, &chunk)?;
+        }
+        std::io::Write::flush(&mut zip_tmp)?;
 
         // 2. Stream-parse Metadata.xml out of the zip (never load it whole).
         let rows = {
