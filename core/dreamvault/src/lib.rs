@@ -18,6 +18,7 @@ pub mod db;
 pub mod error;
 pub mod hotkeys;
 pub mod iso9660;
+pub mod launchbox;
 pub mod library;
 pub mod metadata;
 pub mod models;
