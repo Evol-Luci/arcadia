@@ -6,6 +6,7 @@ import { useStore } from "../store/useStore";
 import { Focusable } from "../components/Focusable";
 import { noteGameLaunched } from "../nav/spatialNav";
 import { platformName, platformShort, formatPlaytime, formatRelative } from "../lib/platforms";
+import { displayTitle } from "../lib/game";
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -24,6 +25,8 @@ export function GameDetail({ gameId }: { gameId: string }) {
   const [artQuery, setArtQuery] = useState("");
   const [suggestions, setSuggestions] = useState<string[]>([]);
   const [showLaunchSettings, setShowLaunchSettings] = useState(false);
+  const [editingTitle, setEditingTitle] = useState(false);
+  const [titleDraft, setTitleDraft] = useState("");
 
   const refreshCover = () => {
     bumpCoverVersion();
@@ -47,6 +50,17 @@ export function GameDetail({ gameId }: { gameId: string }) {
       qc.invalidateQueries({ queryKey: ["games"] });
     },
     onError: (e: unknown) => setToast(`Launch failed: ${String(e)}`),
+  });
+
+  const rename = useMutation({
+    mutationFn: (title: string | null) => api.setCustomTitle(gameId, title),
+    onSuccess: () => {
+      setEditingTitle(false);
+      qc.invalidateQueries({ queryKey: ["game", gameId] });
+      qc.invalidateQueries({ queryKey: ["games"] });
+      setToast("Name updated");
+    },
+    onError: (e: unknown) => setToast(`Rename failed: ${String(e)}`),
   });
 
   // Disc list for multi-disc games. Empty for single-disc titles, so the picker
@@ -212,7 +226,7 @@ export function GameDetail({ gameId }: { gameId: string }) {
           <div className="glass overflow-hidden rounded-3xl">
             <div className="aspect-[3/4] bg-surface-2">
               {cover ? (
-                <img src={cover} alt={g.title} className="h-full w-full object-contain" />
+                <img src={cover} alt={displayTitle(g)} className="h-full w-full object-contain" />
               ) : (
                 <div className="flex h-full w-full items-center justify-center font-display text-6xl font-black text-primary/30">
                   {platformShort(g.platform)}
@@ -232,7 +246,7 @@ export function GameDetail({ gameId }: { gameId: string }) {
                 onKeyDown={(e) => {
                   if (e.key === "Enter") suggest.mutate(artQuery);
                 }}
-                placeholder={g.title}
+                placeholder={displayTitle(g)}
                 aria-label="Search libretro box art"
                 className="glass min-w-0 flex-1 rounded-xl bg-surface-2 px-3 py-2 text-xs outline-none placeholder:text-ink-dim/60"
               />
@@ -278,9 +292,63 @@ export function GameDetail({ gameId }: { gameId: string }) {
           <div className="mb-1 text-xs uppercase tracking-widest text-primary">
             {platformName(g.platform)}
           </div>
-          <h1 className="font-display text-4xl font-black tracking-wide text-glow">
-            {g.title}
-          </h1>
+          {editingTitle ? (
+            <div className="flex flex-col gap-2">
+              <input
+                autoFocus
+                value={titleDraft}
+                onChange={(e) => setTitleDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") rename.mutate(titleDraft);
+                  if (e.key === "Escape") setEditingTitle(false);
+                }}
+                aria-label="Edit display name"
+                placeholder={g.title}
+                className="glass w-full rounded-xl bg-surface-2 px-3 py-2 font-display text-2xl font-bold outline-none placeholder:text-ink-dim/60"
+              />
+              <div className="flex gap-2">
+                <Focusable
+                  onActivate={() => rename.mutate(titleDraft)}
+                  ariaLabel="Save name"
+                  className="glass rounded-xl px-3 py-1.5 text-xs font-semibold"
+                >
+                  {rename.isPending ? "Saving…" : "Save"}
+                </Focusable>
+                {g.custom_title && (
+                  <Focusable
+                    onActivate={() => rename.mutate(null)}
+                    ariaLabel="Reset to original name"
+                    className="glass rounded-xl px-3 py-1.5 text-xs font-semibold text-ink-dim"
+                  >
+                    Reset to original
+                  </Focusable>
+                )}
+                <Focusable
+                  onActivate={() => setEditingTitle(false)}
+                  ariaLabel="Cancel rename"
+                  className="glass rounded-xl px-3 py-1.5 text-xs font-semibold text-ink-dim"
+                >
+                  Cancel
+                </Focusable>
+              </div>
+            </div>
+          ) : (
+            <div className="flex items-center gap-3">
+              <h1 className="font-display text-4xl font-black tracking-wide text-glow">
+                {displayTitle(g)}
+              </h1>
+              <Focusable
+                onActivate={() => {
+                  setTitleDraft(displayTitle(g));
+                  setEditingTitle(true);
+                }}
+                ariaLabel="Edit display name"
+                className="glass rounded-lg px-2 py-1 text-xs font-semibold text-ink-dim"
+              >
+                Edit name
+              </Focusable>
+            </div>
+          )}
 
           <div className="mt-3 flex gap-6 text-sm text-ink-dim">
             <span>{formatPlaytime(g.playtime_minutes)}</span>
