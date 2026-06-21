@@ -416,7 +416,11 @@ impl Engine {
             ) VALUES (?,?,?,?,?,?,?,?)
             ON CONFLICT(profile_id, rom_path) DO UPDATE SET
                 title      = excluded.title,
-                sort_title = excluded.sort_title,
+                sort_title = CASE
+                               WHEN custom_title IS NOT NULL AND custom_title <> ''
+                               THEN games.sort_title
+                               ELSE excluded.sort_title
+                             END,
                 platform   = excluded.platform,
                 file_size  = excluded.file_size
             "#,
@@ -586,6 +590,41 @@ impl Engine {
             .bind(game_id)
             .execute(&self.pool)
             .await?;
+        Ok(())
+    }
+
+    /// Set or clear a game's user display-name override. A non-empty (trimmed)
+    /// name becomes `custom_title` and drives `sort_title` (so sort and search
+    /// follow the new name). Passing `None` or a whitespace-only name clears the
+    /// override and reverts `sort_title` to the scanned `title`'s key.
+    pub async fn set_custom_title(&self, game_id: &str, title: Option<&str>) -> Result<()> {
+        let trimmed = title.map(str::trim).filter(|s| !s.is_empty());
+        match trimmed {
+            Some(name) => {
+                sqlx::query("UPDATE games SET custom_title = ?, sort_title = ? WHERE id = ?")
+                    .bind(name)
+                    .bind(sort_key(name))
+                    .bind(game_id)
+                    .execute(&self.pool)
+                    .await?;
+            }
+            None => {
+                let derived: Option<String> =
+                    sqlx::query_scalar("SELECT title FROM games WHERE id = ?")
+                        .bind(game_id)
+                        .fetch_optional(&self.pool)
+                        .await?;
+                if let Some(derived) = derived {
+                    sqlx::query(
+                        "UPDATE games SET custom_title = NULL, sort_title = ? WHERE id = ?",
+                    )
+                    .bind(sort_key(&derived))
+                    .bind(game_id)
+                    .execute(&self.pool)
+                    .await?;
+                }
+            }
+        }
         Ok(())
     }
 
@@ -986,7 +1025,7 @@ fn sort_key(title: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{base_title, disc_number};
+    use super::{base_title, disc_number, ScanReport};
     use crate::{db, Engine};
 
     async fn insert_game(engine: &Engine, profile_id: &str, id: &str, rom_path: &str) {
@@ -1125,5 +1164,132 @@ mod tests {
         // Bare markers (no parens) are the case base_title actually cleans up.
         assert_eq!(base_title("Chrono Cross - Disc 1"), "Chrono Cross");
         assert_eq!(base_title("Parasite Eve Disc 2"), "Parasite Eve");
+    }
+
+    #[tokio::test]
+    async fn set_and_clear_custom_title_updates_sort_key() {
+        let pool = db::connect_in_memory().await.unwrap();
+        let engine = Engine::with_pool(pool).await.unwrap();
+        let profile = engine.ensure_default_profile().await.unwrap();
+
+        sqlx::query(
+            "INSERT INTO games (id, profile_id, title, sort_title, platform, rom_path, added_at)
+             VALUES ('g1', ?, 'SLU1654', 'slu1654', 'ps2', '/roms/ps2/SLU1654.iso', '2026-01-01T00:00:00Z')",
+        )
+        .bind(&profile.id)
+        .execute(&engine.pool)
+        .await
+        .unwrap();
+
+        // Set a custom name (with surrounding whitespace to prove trimming).
+        engine
+            .set_custom_title("g1", Some("  The Final Fantasy X  "))
+            .await
+            .unwrap();
+        let row: (Option<String>, String, String) =
+            sqlx::query_as("SELECT custom_title, sort_title, title FROM games WHERE id = 'g1'")
+                .fetch_one(&engine.pool)
+                .await
+                .unwrap();
+        assert_eq!(row.0.as_deref(), Some("The Final Fantasy X"));
+        // sort_key lowercases and strips a leading "the ".
+        assert_eq!(row.1, "final fantasy x");
+        assert_eq!(row.2, "SLU1654"); // derived title untouched
+
+        // Clear it -> sort_title reverts to the derived title's key.
+        engine.set_custom_title("g1", None).await.unwrap();
+        let row: (Option<String>, String) =
+            sqlx::query_as("SELECT custom_title, sort_title FROM games WHERE id = 'g1'")
+                .fetch_one(&engine.pool)
+                .await
+                .unwrap();
+        assert_eq!(row.0, None);
+        assert_eq!(row.1, "slu1654");
+    }
+
+    #[tokio::test]
+    async fn empty_custom_title_clears_override() {
+        let pool = db::connect_in_memory().await.unwrap();
+        let engine = Engine::with_pool(pool).await.unwrap();
+        let profile = engine.ensure_default_profile().await.unwrap();
+
+        sqlx::query(
+            "INSERT INTO games (id, profile_id, title, sort_title, platform, rom_path, added_at)
+             VALUES ('g1', ?, 'SLU1654', 'slu1654', 'ps2', '/roms/ps2/SLU1654.iso', '2026-01-01T00:00:00Z')",
+        )
+        .bind(&profile.id)
+        .execute(&engine.pool)
+        .await
+        .unwrap();
+
+        engine.set_custom_title("g1", Some("Renamed")).await.unwrap();
+        engine.set_custom_title("g1", Some("   ")).await.unwrap(); // whitespace-only => clear
+        let custom: Option<String> =
+            sqlx::query_scalar("SELECT custom_title FROM games WHERE id = 'g1'")
+                .fetch_one(&engine.pool)
+                .await
+                .unwrap();
+        assert_eq!(custom, None);
+    }
+
+    #[tokio::test]
+    async fn rescan_preserves_custom_title_and_its_sort_key() {
+        let pool = db::connect_in_memory().await.unwrap();
+        let engine = Engine::with_pool(pool).await.unwrap();
+        let profile = engine.ensure_default_profile().await.unwrap();
+
+        let mut report = ScanReport::default();
+
+        // First index (insert path). insert_game takes a transaction-backed
+        // connection, mirroring the scanner (`self.pool.begin()` -> `&mut tx`).
+        let mut tx = engine.pool.begin().await.unwrap();
+        let id = engine
+            .insert_game(
+                &mut tx,
+                &profile.id,
+                "SLU1654",
+                "ps2",
+                "/roms/ps2/SLU1654.iso",
+                123,
+                "2026-01-01T00:00:00Z",
+                &mut report,
+            )
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+
+        engine
+            .set_custom_title(&id, Some("Final Fantasy X"))
+            .await
+            .unwrap();
+
+        // Re-index the same ROM (same profile_id + rom_path) -> upsert path.
+        let mut tx = engine.pool.begin().await.unwrap();
+        engine
+            .insert_game(
+                &mut tx,
+                &profile.id,
+                "SLU1654",
+                "ps2",
+                "/roms/ps2/SLU1654.iso",
+                456,
+                "2026-02-01T00:00:00Z",
+                &mut report,
+            )
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+
+        let row: (Option<String>, String, String, i64) = sqlx::query_as(
+            "SELECT custom_title, sort_title, title, file_size FROM games WHERE id = ?",
+        )
+        .bind(&id)
+        .fetch_one(&engine.pool)
+        .await
+        .unwrap();
+        assert_eq!(row.0.as_deref(), Some("Final Fantasy X")); // override kept
+        assert_eq!(row.1, "final fantasy x"); // custom sort key kept
+        assert_eq!(row.2, "SLU1654"); // derived title still refreshed
+        assert_eq!(row.3, 456); // other derived fields still refreshed
     }
 }
