@@ -545,7 +545,9 @@ impl Engine {
             sql.push_str(" AND favorite = 1");
         }
         if q.search.is_some() {
-            sql.push_str(" AND sort_title LIKE ?");
+            // Match the (possibly custom) sort key OR the original scanned
+            // title, so a renamed game still surfaces under its coded name.
+            sql.push_str(" AND (sort_title LIKE ? OR LOWER(title) LIKE ?)");
         }
         let order = match q.sort.as_deref() {
             Some("recent") => " ORDER BY last_played DESC NULLS LAST, sort_title",
@@ -562,7 +564,8 @@ impl Engine {
             query = query.bind(p);
         }
         if let Some(s) = &q.search {
-            query = query.bind(format!("%{}%", s.to_lowercase()));
+            let pattern = format!("%{}%", s.to_lowercase());
+            query = query.bind(pattern.clone()).bind(pattern);
         }
         Ok(query.fetch_all(&self.pool).await?)
     }
@@ -1025,7 +1028,7 @@ fn sort_key(title: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{base_title, disc_number, ScanReport};
+    use super::{base_title, disc_number, GameQuery, ScanReport};
     use crate::{db, Engine};
 
     async fn insert_game(engine: &Engine, profile_id: &str, id: &str, rom_path: &str) {
@@ -1311,5 +1314,43 @@ mod tests {
 
         let stats = engine.library_stats(&profile.id).await.unwrap();
         assert_eq!(stats.most_played[0].title, "Final Fantasy X");
+    }
+
+    #[tokio::test]
+    async fn search_matches_custom_and_original_title() {
+        let pool = db::connect_in_memory().await.unwrap();
+        let engine = Engine::with_pool(pool).await.unwrap();
+        let profile = engine.ensure_default_profile().await.unwrap();
+
+        sqlx::query(
+            "INSERT INTO games (id, profile_id, title, sort_title, platform, rom_path, added_at)
+             VALUES ('g1', ?, 'SLU1654', 'slu1654', 'ps2', '/roms/ps2/SLU1654.iso', '2026-01-01T00:00:00Z')",
+        )
+        .bind(&profile.id)
+        .execute(&engine.pool)
+        .await
+        .unwrap();
+        engine.set_custom_title("g1", Some("Final Fantasy X")).await.unwrap();
+
+        let by_custom = engine
+            .list_games(&GameQuery {
+                profile_id: profile.id.clone(),
+                search: Some("final".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(by_custom.len(), 1, "renamed game found by new name");
+
+        // Original coded name still matches after rename.
+        let by_original = engine
+            .list_games(&GameQuery {
+                profile_id: profile.id.clone(),
+                search: Some("SLU1654".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(by_original.len(), 1, "renamed game still found by coded name");
     }
 }
