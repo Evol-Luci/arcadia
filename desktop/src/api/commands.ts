@@ -6,9 +6,14 @@ import type {
   AdapterDescriptor,
   Collection,
   CollectionSummary,
+  ApplyOutcome,
+  ConsolePad,
   ControllerConfig,
   ControllerProfile,
   Emulator,
+  MaterializePreview,
+  SystemControllerProfile,
+  EmulatorHotkey,
   Game,
   GameDisc,
   GameQuery,
@@ -109,6 +114,8 @@ export const api = {
     invoke<SaveState[]>("list_save_states", { gameId }),
   gameSupportsLaunchState: (gameId: string) =>
     invoke<boolean>("game_supports_launch_state", { gameId }),
+  gameHotkeys: (gameId: string) =>
+    invoke<EmulatorHotkey[]>("game_hotkeys", { gameId }),
 
   // Screenshots
   scanScreenshots: (profileId: string) =>
@@ -151,6 +158,22 @@ export const api = {
   hidapiStatus: () => invoke<HidapiStatus>("hidapi_status"),
   setHidapiWorkaround: (policy: HidapiWorkaround) =>
     invoke<void>("set_hidapi_workaround", { policy }),
+
+  // Per-system controller profiles (input-setup module)
+  consolePad: (system: string) =>
+    invoke<ConsolePad | null>("console_pad", { system }),
+  systemControllerProfiles: () =>
+    invoke<SystemControllerProfile[]>("system_controller_profiles"),
+  saveSystemControllerProfile: (profile: SystemControllerProfile) =>
+    invoke<SystemControllerProfile>("save_system_controller_profile", { profile }),
+  deleteSystemControllerProfile: (id: string) =>
+    invoke<void>("delete_system_controller_profile", { id }),
+  assignSystemControllerProfile: (system: string, profileId: string | null) =>
+    invoke<void>("assign_system_controller_profile", { system, profileId }),
+  previewSystemControllerProfile: (id: string) =>
+    invoke<MaterializePreview>("preview_system_controller_profile", { id }),
+  applySystemControllerProfile: (system: string) =>
+    invoke<ApplyOutcome>("apply_system_controller_profile", { system }),
 
   // Cloud Sync
   syncConfig: () => invoke<SyncConfig>("sync_config"),

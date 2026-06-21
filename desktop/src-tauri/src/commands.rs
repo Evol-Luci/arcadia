@@ -6,9 +6,10 @@ use dreamvault::achievements::{RaGameCandidate, RaGameProgress, RaUserSummary};
 use dreamvault::adapters::AdapterDescriptor;
 use dreamvault::config::{
     ControllerConfig, ControllerProfile, HidapiWorkaround, RetroAchievementsCredentials,
-    ScreenScraperCredentials, SyncConfig,
+    ScreenScraperCredentials, SyncConfig, SystemControllerProfile,
 };
-use dreamvault::controller::HidapiStatus;
+use dreamvault::console_pads::ConsolePad;
+use dreamvault::controller::{ApplyOutcome, HidapiStatus, MaterializePreview};
 use dreamvault::library::{GameQuery, ScanReport};
 use dreamvault::models::{
     Achievement, Collection, CollectionSummary, Emulator, Game, GameDisc, GameSettings,
@@ -16,6 +17,7 @@ use dreamvault::models::{
 };
 use dreamvault::plugins::PluginInfo;
 use dreamvault::registry::PlatformEmulators;
+use dreamvault::hotkeys::EmulatorHotkey;
 use dreamvault::save_states::SaveState;
 use dreamvault::stats::LaunchResult;
 use dreamvault::sync::{SyncReport, SyncStatus};
@@ -419,6 +421,18 @@ pub async fn game_supports_launch_state(
     map(state.engine.game_supports_launch_state(&game_id).await)
 }
 
+/// This game's emulator hotkeys (save/load state, slots, screenshot, pause,
+/// fast-forward, fullscreen, menu, exit) as a read-only label→binding list,
+/// overlaid on the emulator's documented defaults. Empty for emulators we don't
+/// map, which the UI hides.
+#[tauri::command]
+pub async fn game_hotkeys(
+    state: State<'_, AppState>,
+    game_id: String,
+) -> CmdResult<Vec<EmulatorHotkey>> {
+    map(state.engine.game_hotkeys(&game_id).await)
+}
+
 // ---- Screenshots ----------------------------------------------------------
 
 #[tauri::command]
@@ -569,6 +583,75 @@ pub fn set_hidapi_workaround(
     policy: HidapiWorkaround,
 ) -> CmdResult<()> {
     map(state.engine.set_hidapi_workaround(policy))
+}
+
+// ---- Per-system controller profiles (input-setup module) ------------------
+
+/// The target input layout for a system, or `null` if not yet catalogued.
+#[tauri::command]
+pub fn console_pad(system: String) -> Option<ConsolePad> {
+    dreamvault::console_pads::pad_for(&system).copied()
+}
+
+#[tauri::command]
+pub fn system_controller_profiles(state: State<'_, AppState>) -> Vec<SystemControllerProfile> {
+    state.engine.system_controller_profiles()
+}
+
+#[tauri::command]
+pub fn save_system_controller_profile(
+    state: State<'_, AppState>,
+    profile: SystemControllerProfile,
+) -> CmdResult<SystemControllerProfile> {
+    map(state.engine.save_system_controller_profile(profile))
+}
+
+#[tauri::command]
+pub fn delete_system_controller_profile(state: State<'_, AppState>, id: String) -> CmdResult<()> {
+    map(state.engine.delete_system_controller_profile(&id))
+}
+
+#[tauri::command]
+pub fn assign_system_controller_profile(
+    state: State<'_, AppState>,
+    system: String,
+    profile_id: Option<String>,
+) -> CmdResult<()> {
+    map(state
+        .engine
+        .assign_system_controller_profile(&system, profile_id.as_deref()))
+}
+
+#[tauri::command]
+pub fn preview_system_controller_profile(
+    state: State<'_, AppState>,
+    id: String,
+) -> CmdResult<MaterializePreview> {
+    map(state.engine.preview_system_controller_profile(&id))
+}
+
+#[tauri::command]
+pub async fn apply_system_controller_profile(
+    state: State<'_, AppState>,
+    system: String,
+) -> CmdResult<ApplyOutcome> {
+    // Tier-B writers (Mupen64Plus, Mednafen) need the pad's raw SDL-joystick
+    // element indices — and, for Mednafen, its joystick GUID — which only the
+    // same libSDL2 the emulator uses can answer. Probe here in the Tauri layer
+    // (where the SDL FFI lives) and hand the resolved mapping + GUID to the pure
+    // engine. Tier-A (RetroArch) ignores both. A `None` probe (no controller /
+    // SDL unavailable) is passed through so the engine can report a clean
+    // "connect the pad" error for Tier-B rather than guessing.
+    let probed = crate::sdl_probe::probe_first_controller();
+    let mapping = probed.as_ref().map(|p| &p.mapping);
+    let guid = probed.as_ref().and_then(|p| p.guid.as_deref());
+    // mGBA's Qt frontend keys its per-device input-profile (which overrides the
+    // generic SDLB section it loads first) by the raw joystick *name*.
+    let name = probed.as_ref().and_then(|p| p.name.as_deref());
+    map(state
+        .engine
+        .apply_system_controller_profile(&system, mapping, guid, name)
+        .await)
 }
 
 // ---- Cloud Sync -----------------------------------------------------------

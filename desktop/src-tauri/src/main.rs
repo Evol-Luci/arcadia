@@ -3,6 +3,7 @@
 
 mod commands;
 mod gamepad;
+mod sdl_probe;
 
 use commands::AppState;
 use dreamvault::{ArcadiaPaths, Engine};
@@ -137,6 +138,7 @@ fn main() {
             commands::delete_save_backup,
             commands::list_save_states,
             commands::game_supports_launch_state,
+            commands::game_hotkeys,
             commands::scan_screenshots,
             commands::list_screenshots,
             commands::recent_screenshots,
@@ -158,6 +160,13 @@ fn main() {
             commands::set_active_controller_profile,
             commands::hidapi_status,
             commands::set_hidapi_workaround,
+            commands::console_pad,
+            commands::system_controller_profiles,
+            commands::save_system_controller_profile,
+            commands::delete_system_controller_profile,
+            commands::assign_system_controller_profile,
+            commands::preview_system_controller_profile,
+            commands::apply_system_controller_profile,
             commands::sync_config,
             commands::set_sync_config,
             commands::sync_status,

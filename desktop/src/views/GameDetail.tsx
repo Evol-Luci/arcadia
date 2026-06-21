@@ -437,6 +437,8 @@ export function GameDetail({ gameId }: { gameId: string }) {
 
           <GameSaveStates gameId={gameId} />
 
+          <GameHotkeys gameId={gameId} />
+
           <GameAchievements gameId={gameId} platform={g.platform} title={g.title} />
 
           <GameScreenshots gameId={gameId} />
@@ -803,6 +805,49 @@ function GameSaveStates({ gameId }: { gameId: string }) {
         {canRecall
           ? "Savestates Arcadia found for this game. Click one to boot straight into it."
           : "Savestates Arcadia found for this game. This emulator can't boot into a state from the command line, so load one from its own menu."}
+      </p>
+    </div>
+  );
+}
+
+function GameHotkeys({ gameId }: { gameId: string }) {
+  const hotkeys = useQuery({
+    queryKey: ["game-hotkeys", gameId],
+    queryFn: () => api.gameHotkeys(gameId),
+  });
+  const list = hotkeys.data ?? [];
+  if (list.length === 0) return null;
+
+  return (
+    <div className="mt-8 max-w-xl">
+      <h2 className="mb-2 font-display text-sm font-bold uppercase tracking-wider text-ink-dim">
+        Hotkeys
+      </h2>
+      <div className="glass flex flex-col gap-px overflow-hidden rounded-xl bg-surface-2">
+        {list.map((h) => (
+          <div
+            key={`${h.device}-${h.action}`}
+            className="flex items-center justify-between gap-4 px-3 py-2"
+          >
+            <span className="text-sm">{h.label}</span>
+            <span className="flex flex-wrap items-center justify-end gap-1">
+              {h.binding.split(" + ").map((part, i) => (
+                <kbd
+                  key={i}
+                  className={`rounded-md border border-white/10 bg-surface-1 px-2 py-0.5 font-mono text-[11px] ${
+                    h.is_default ? "text-ink-dim/70" : "text-ink"
+                  }`}
+                >
+                  {part}
+                </kbd>
+              ))}
+            </span>
+          </div>
+        ))}
+      </div>
+      <p className="mt-2 text-[11px] leading-snug text-ink-dim/80">
+        Hotkeys for the emulator that launches this game. Dimmed keys are
+        emulator defaults; bright keys are your own overrides.
       </p>
     </div>
   );

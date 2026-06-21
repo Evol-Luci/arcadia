@@ -11,9 +11,12 @@ pub mod achievements;
 pub mod adapters;
 pub mod archive;
 pub mod config;
+pub mod console_pads;
 pub mod controller;
+pub mod controller_write;
 pub mod db;
 pub mod error;
+pub mod hotkeys;
 pub mod iso9660;
 pub mod library;
 pub mod metadata;
@@ -71,6 +74,7 @@ impl Engine {
         };
         engine.ensure_platforms_seeded().await?;
         engine.ensure_default_profile().await?;
+        engine.reconcile_open_sessions().await?;
         Ok(engine)
     }
 
@@ -88,6 +92,7 @@ impl Engine {
         };
         engine.ensure_platforms_seeded().await?;
         engine.ensure_default_profile().await?;
+        engine.reconcile_open_sessions().await?;
         Ok(engine)
     }
 
@@ -171,6 +176,59 @@ mod tests {
 
         let n64 = platforms::by_id("n64").unwrap();
         assert_eq!(n64.adapter_hint, "mupen64plus");
+    }
+
+    #[tokio::test]
+    async fn reconcile_closes_orphaned_open_sessions() {
+        let engine = test_engine().await;
+        let profile = engine.ensure_default_profile().await.unwrap();
+
+        // A real game to satisfy the play_sessions -> games foreign key.
+        sqlx::query(
+            "INSERT INTO games (id, profile_id, title, sort_title, platform, rom_path, added_at) \
+             VALUES (?,?,?,?,?,?,?)",
+        )
+        .bind("ghost-game")
+        .bind(&profile.id)
+        .bind("Ghost Game")
+        .bind("ghost game")
+        .bind("snes")
+        .bind("/tmp/ghost.sfc")
+        .bind(now_rfc3339())
+        .execute(engine.pool())
+        .await
+        .unwrap();
+
+        // A session left open by a prior run (crash / force-kill / app close):
+        // `ended_at` is NULL.
+        let started = "2026-06-17T10:00:00+00:00";
+        sqlx::query("INSERT INTO play_sessions (id, game_id, started_at) VALUES (?,?,?)")
+            .bind("orphan-1")
+            .bind("ghost-game")
+            .bind(started)
+            .execute(engine.pool())
+            .await
+            .unwrap();
+
+        let healed = engine.reconcile_open_sessions().await.unwrap();
+        assert_eq!(healed, 1);
+
+        let open: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM play_sessions WHERE ended_at IS NULL")
+                .fetch_one(engine.pool())
+                .await
+                .unwrap();
+        assert_eq!(open, 0, "orphaned session should be closed");
+
+        // Closed honestly: zero-duration, ended_at == started_at.
+        let (ended_at, minutes): (String, i64) =
+            sqlx::query_as("SELECT ended_at, duration_minutes FROM play_sessions WHERE id = ?")
+                .bind("orphan-1")
+                .fetch_one(engine.pool())
+                .await
+                .unwrap();
+        assert_eq!(ended_at, started);
+        assert_eq!(minutes, 0);
     }
 
     #[tokio::test]

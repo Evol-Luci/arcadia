@@ -129,6 +129,36 @@ export interface SaveState {
   modified_at: string | null;
 }
 
+/// One canonical emulator hotkey action. Matches the Rust `HotkeyAction` enum
+/// (serialized snake_case).
+export type HotkeyAction =
+  | "save_state"
+  | "load_state"
+  | "next_slot"
+  | "prev_slot"
+  | "screenshot"
+  | "pause"
+  | "fast_forward_hold"
+  | "fast_forward_toggle"
+  | "rewind"
+  | "toggle_fullscreen"
+  | "toggle_menu"
+  | "exit"
+  | "reset";
+
+export type HotkeyDevice = "keyboard" | "controller";
+
+/// One resolved emulator hotkey for display. binding is a normalized key string
+/// ("F2", "Shift + F1"). is_default is true when sourced from the defaults table
+/// rather than the user's own config.
+export interface EmulatorHotkey {
+  action: HotkeyAction;
+  label: string;
+  binding: string;
+  is_default: boolean;
+  device: HotkeyDevice;
+}
+
 export interface ScreenScraperCredentials {
   dev_id: string;
   dev_password: string;
@@ -207,7 +237,46 @@ export type HidapiWorkaround = "auto" | "force" | "off";
 export interface ControllerConfig {
   profiles: ControllerProfile[];
   active_profile: string | null;
+  system_profiles: SystemControllerProfile[];
+  system_assignments: Record<string, string>;
   sdl_hidapi_workaround: HidapiWorkaround;
+}
+
+export type InputKind = "button" | "dpad" | "stick" | "trigger";
+
+export interface ConsoleInput {
+  id: string;
+  label: string;
+  kind: InputKind;
+}
+
+export interface ConsolePad {
+  system: string;
+  inputs: ConsoleInput[];
+}
+
+/** A per-console mapping. `bindings` keys are ConsolePad input ids; values are
+ * compact W3C descriptors ("btn:0", "axis:1-"). */
+export interface SystemControllerProfile {
+  id: string;
+  name: string;
+  system: string;
+  bindings: Record<string, string>;
+}
+
+/** Dry-run of materializing a profile into emulator config. */
+export interface MaterializePreview {
+  encoded: Record<string, string>;
+  unencoded: string[];
+}
+
+/** Result of writing a profile into an emulator's config. */
+export interface ApplyOutcome {
+  config_path: string;
+  backup_path: string;
+  written: number;
+  unencoded: string[];
+  emulator: string;
 }
 
 export interface HidapiStatus {

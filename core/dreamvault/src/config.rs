@@ -59,11 +59,38 @@ pub struct ControllerConfig {
     /// Id of the active profile, if any.
     #[serde(default)]
     pub active_profile: Option<String>,
+    /// Per-system controller mappings — the source the input-setup module
+    /// materializes into each emulator's config. Distinct from `profiles`
+    /// (app-navigation hints) in lifecycle and key space: these keys are
+    /// constrained to a console's [`crate::console_pads::ConsolePad`] inputs.
+    #[serde(default)]
+    pub system_profiles: Vec<SystemControllerProfile>,
+    /// Which system-profile is active for each system: platform id -> profile id.
+    #[serde(default)]
+    pub system_assignments: std::collections::BTreeMap<String, String>,
     /// Policy for the SDL-HIDAPI vs xpadneo launch workaround (SDL-input
     /// emulators only). Defaults to auto-detect so it fires only on the affected
     /// setup and stays out of the way of everyone else's working controllers.
     #[serde(default)]
     pub sdl_hidapi_workaround: HidapiWorkaround,
+}
+
+/// A per-console button mapping. Unlike [`ControllerProfile`] (logical app-nav
+/// actions) the keys here are a console's canonical input ids
+/// ([`crate::console_pads::ConsolePad`]) and the values are compact, device-
+/// agnostic **W3C Standard Gamepad** descriptors captured from the live pad:
+/// `"btn:N"` for a button index, `"axis:N+"` / `"axis:N-"` for an axis half.
+/// The physical device's identity (SDL GUID/name) is read live at materialize
+/// time, never stored here — it can change between sessions.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SystemControllerProfile {
+    pub id: String,
+    pub name: String,
+    /// Platform id this profile targets (matches a `ConsolePad.system`).
+    pub system: String,
+    /// console_input_id -> W3C descriptor ("btn:0", "axis:1-").
+    #[serde(default)]
+    pub bindings: std::collections::BTreeMap<String, String>,
 }
 
 /// When to force SDL's evdev joystick backend (`SDL_JOYSTICK_HIDAPI=0`) for

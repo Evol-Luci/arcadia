@@ -4,7 +4,52 @@ import { api } from "../api/commands";
 import { useStore } from "../store/useStore";
 import { Focusable } from "../components/Focusable";
 import { setGamepadCapture } from "../nav/spatialNav";
-import type { ControllerProfile, HidapiWorkaround } from "../api/types";
+import type {
+  ConsoleInput,
+  ControllerProfile,
+  HidapiWorkaround,
+  SystemControllerProfile,
+} from "../api/types";
+
+// Systems the input-setup module can write a controller profile for (i.e. the
+// ones present in the engine's ConsolePad catalogue). Labels are display-only.
+const SETUP_SYSTEMS: { id: string; name: string }[] = [
+  { id: "nes", name: "NES" },
+  { id: "snes", name: "SNES" },
+  { id: "n64", name: "Nintendo 64" },
+  { id: "gb", name: "Game Boy" },
+  { id: "gbc", name: "Game Boy Color" },
+  { id: "gba", name: "Game Boy Advance" },
+  { id: "ps1", name: "PlayStation" },
+  { id: "ps2", name: "PlayStation 2" },
+  { id: "virtualboy", name: "Virtual Boy" },
+];
+
+// Render a stored W3C descriptor ("btn:0", "axis:1-") as a friendly label.
+function describeBinding(desc: string | undefined): string {
+  if (!desc) return "—";
+  if (desc.startsWith("btn:")) {
+    const n = Number(desc.slice(4));
+    return BUTTON_NAMES[n] ?? `Button ${n}`;
+  }
+  if (desc.startsWith("axis:")) {
+    const body = desc.slice(5);
+    const sign = body.endsWith("+") ? "+" : body.endsWith("-") ? "−" : "";
+    return `Axis ${body.slice(0, -1)}${sign}`;
+  }
+  return desc;
+}
+
+// The raw W3C token for a binding, shown alongside the friendly name so a
+// mis-press is unambiguous (e.g. the face label "Y" carries "btn 3"). Returns
+// "" for an unset binding. Buttons benefit most — the friendly name hides the
+// index — while axis labels already include their number, so we only surface
+// the bare index for buttons.
+function rawToken(desc: string | undefined): string {
+  if (!desc) return "";
+  if (desc.startsWith("btn:")) return `btn ${desc.slice(4)}`;
+  return "";
+}
 
 // Standard-mapping button indices → readable names, for the live tester.
 const BUTTON_NAMES: Record<number, string> = {
@@ -53,20 +98,76 @@ interface PadState {
   axes: number[];
 }
 
+type TesterMode = "idle" | "test" | "setup";
+
+// First pressed button, else first decisively-moved axis, as a W3C descriptor.
+function detectPress(live: Gamepad): string | null {
+  const btn = live.buttons.findIndex((b) => b.pressed);
+  if (btn >= 0) return `btn:${btn}`;
+  const ax = live.axes.findIndex((a) => Math.abs(a) > 0.6);
+  if (ax >= 0) return `axis:${ax}${live.axes[ax] > 0 ? "+" : "-"}`;
+  return null;
+}
+
+// The pad is "neutral" once nothing is held — the gate between two captures so a
+// single held press can't fill more than one input.
+function isNeutral(live: Gamepad): boolean {
+  return (
+    live.buttons.every((b) => !b.pressed) &&
+    live.axes.every((a) => Math.abs(a) < 0.3)
+  );
+}
+
 export function Controller() {
+  const qc = useQueryClient();
+  const setToast = useStore((s) => s.setToast);
+
   const [pad, setPad] = useState<PadState | null>(null);
-  const [testing, setTesting] = useState(false);
+  const [mode, setMode] = useState<TesterMode>("idle");
   const raf = useRef(0);
-  const testingRef = useRef(false);
+  const modeRef = useRef<TesterMode>("idle");
   const prevStart = useRef(false);
 
-  // Capturing locks the gamepad to the tester so it stops driving app
-  // navigation. Always released when leaving the view.
+  // Console-setup state. `draft` is the working binding map; `guidedIndex` walks
+  // the layout one input at a time; `singleCapture` re-arms a single input.
+  const [system, setSystem] = useState(SETUP_SYSTEMS[0].id);
+  const [activeProfile, setActiveProfile] = useState<SystemControllerProfile | null>(null);
+  const [draft, setDraft] = useState<Record<string, string>>({});
+  const [guidedIndex, setGuidedIndex] = useState<number | null>(null);
+  const [singleCapture, setSingleCapture] = useState<string | null>(null);
+
+  // Refs the rAF poll reads without restarting.
+  const guidedIndexRef = useRef<number | null>(null);
+  const singleCaptureRef = useRef<string | null>(null);
+  const inputsRef = useRef<ConsoleInput[]>([]);
+  const releaseGate = useRef(false);
+
+  const config = useQuery({
+    queryKey: ["controller-config"],
+    queryFn: () => api.controllerConfig(),
+  });
+  const padLayout = useQuery({
+    queryKey: ["console-pad", system],
+    queryFn: () => api.consolePad(system),
+    enabled: mode === "setup",
+  });
+  const inputs = padLayout.data?.inputs ?? [];
+
+  // Lock the pad away from app navigation whenever testing or setting up.
   useEffect(() => {
-    testingRef.current = testing;
-    setGamepadCapture(testing);
-  }, [testing]);
+    modeRef.current = mode;
+    setGamepadCapture(mode !== "idle");
+  }, [mode]);
   useEffect(() => () => setGamepadCapture(false), []);
+  useEffect(() => {
+    guidedIndexRef.current = guidedIndex;
+  }, [guidedIndex]);
+  useEffect(() => {
+    singleCaptureRef.current = singleCapture;
+  }, [singleCapture]);
+  useEffect(() => {
+    inputsRef.current = inputs;
+  }, [inputs]);
 
   useEffect(() => {
     const poll = () => {
@@ -79,13 +180,36 @@ export function Controller() {
           values: live.buttons.map((b) => Math.round(b.value * 100) / 100),
           axes: live.axes.map((a) => Math.round(a * 100) / 100),
         });
-        // While capturing, app nav is paused, so let the Start button toggle
-        // the tester back off (rising edge so a held press fires once).
-        const startPressed = !!live.buttons[9]?.pressed;
-        if (startPressed && !prevStart.current && testingRef.current) {
-          setTesting(false);
+
+        // Which input, if any, is currently armed for capture.
+        const layout = inputsRef.current;
+        const gi = guidedIndexRef.current;
+        const activeId =
+          singleCaptureRef.current ??
+          (gi !== null ? layout[gi]?.id ?? null : null);
+
+        if (activeId) {
+          if (releaseGate.current) {
+            if (isNeutral(live)) releaseGate.current = false;
+          } else {
+            const desc = detectPress(live);
+            if (desc) {
+              setDraft((d) => ({ ...d, [activeId]: desc }));
+              releaseGate.current = true;
+              if (singleCaptureRef.current) {
+                setSingleCapture(null);
+              } else if (gi !== null) {
+                const next = gi + 1;
+                setGuidedIndex(next >= layout.length ? null : next);
+              }
+            }
+          }
+        } else if (modeRef.current === "test") {
+          // In the plain tester, Start exits (rising edge → fires once).
+          const startPressed = !!live.buttons[9]?.pressed;
+          if (startPressed && !prevStart.current) setMode("idle");
+          prevStart.current = startPressed;
         }
-        prevStart.current = startPressed;
       } else {
         setPad(null);
         prevStart.current = false;
@@ -96,6 +220,99 @@ export function Controller() {
     return () => cancelAnimationFrame(raf.current);
   }, []);
 
+  const invalidate = () =>
+    qc.invalidateQueries({ queryKey: ["controller-config"] });
+
+  const stopCapture = () => {
+    setGuidedIndex(null);
+    setSingleCapture(null);
+  };
+
+  // Begin (or restart) the guided walk through every input.
+  const recordAll = () => {
+    if (inputs.length === 0) return;
+    setSingleCapture(null);
+    releaseGate.current = true; // wait for the activating press to release first
+    setGuidedIndex(0);
+  };
+
+  const armSingle = (id: string) => {
+    setGuidedIndex(null);
+    releaseGate.current = true;
+    setSingleCapture((cur) => (cur === id ? null : id));
+  };
+
+  const selectProfile = (p: SystemControllerProfile | null) => {
+    stopCapture();
+    setActiveProfile(p);
+    setDraft(p ? { ...p.bindings } : {});
+  };
+
+  const create = useMutation({
+    mutationFn: (args: { name: string; system: string }) =>
+      api.saveSystemControllerProfile({
+        id: "",
+        name: args.name,
+        system: args.system,
+        bindings: {},
+      }),
+    onSuccess: (p) => {
+      setToast(`Profile "${p.name}" created.`);
+      selectProfile(p);
+      invalidate();
+    },
+    onError: (e: unknown) => setToast(`Couldn't create: ${String(e)}`),
+  });
+
+  const save = useMutation({
+    mutationFn: () =>
+      api.saveSystemControllerProfile({ ...activeProfile!, bindings: draft }),
+    onSuccess: (p) => {
+      setToast("Mapping saved.");
+      setActiveProfile(p);
+      invalidate();
+    },
+    onError: (e: unknown) => setToast(`Couldn't save: ${String(e)}`),
+  });
+
+  const assign = useMutation({
+    mutationFn: () =>
+      api.assignSystemControllerProfile(activeProfile!.system, activeProfile!.id),
+    onSuccess: () => {
+      setToast("Assigned to system.");
+      invalidate();
+    },
+    onError: (e: unknown) => setToast(`Couldn't assign: ${String(e)}`),
+  });
+
+  const apply = useMutation({
+    mutationFn: () => api.applySystemControllerProfile(activeProfile!.system),
+    onSuccess: (out) => {
+      const skipped =
+        out.unencoded.length > 0
+          ? ` (${out.unencoded.length} left for the core's own remap)`
+          : "";
+      setToast(`Wrote ${out.written} bindings to ${out.emulator}${skipped}.`);
+    },
+    onError: (e: unknown) => setToast(`Couldn't apply: ${String(e)}`),
+  });
+
+  const remove = useMutation({
+    mutationFn: (id: string) => api.deleteSystemControllerProfile(id),
+    onSuccess: () => {
+      selectProfile(null);
+      invalidate();
+    },
+  });
+
+  const profilesForSystem =
+    config.data?.system_profiles.filter((p) => p.system === system) ?? [];
+  const assignments = config.data?.system_assignments ?? {};
+  const assigned =
+    !!activeProfile && assignments[activeProfile.system] === activeProfile.id;
+  const guidedLabel =
+    guidedIndex !== null ? inputs[guidedIndex]?.label ?? "" : "";
+
   return (
     <div className="animate-fade-up max-w-3xl">
       <h1 className="mb-6 font-display text-3xl font-black tracking-wide text-glow">
@@ -103,32 +320,88 @@ export function Controller() {
       </h1>
 
       <section className="mb-6">
-        <h2 className="font-display text-lg font-bold">Live Tester</h2>
-        <p className="mb-3 text-xs text-ink-dim">
-          Press buttons on a connected gamepad to verify the OS sees it. Arcadia
-          itself navigates with the d-pad, A and B, and the bumpers — start
-          testing to lock the controller to the tester so it stops moving the
-          menus.
-        </p>
-
-        <div className="mb-3 flex items-center gap-3">
-          <Focusable
-            onActivate={() => setTesting((t) => !t)}
-            ariaLabel={testing ? "Stop controller test" : "Start controller test"}
-            className={`rounded-lg px-4 py-1.5 text-sm font-semibold ${
-              testing ? "bg-secondary text-black" : "bg-primary text-black"
-            }`}
-          >
-            {testing ? "Stop testing" : "Start testing"}
-          </Focusable>
-          {testing && (
-            <span className="text-xs text-ink-dim">
-              Capturing — app navigation paused. Press{" "}
-              <span className="font-semibold text-ink">Start</span> on the pad,
-              or activate this button, to stop.
-            </span>
-          )}
+        <div className="mb-3 flex items-center gap-2">
+          <h2 className="font-display text-lg font-bold">
+            {mode === "setup" ? "Console Setup" : "Live Tester"}
+          </h2>
+          <span className="flex-1" />
+          {(["test", "setup"] as const).map((m) => {
+            const on = mode === m;
+            return (
+              <Focusable
+                key={m}
+                onActivate={() => {
+                  stopCapture();
+                  setMode(on ? "idle" : m);
+                }}
+                ariaLabel={m === "test" ? "Live tester" : "Console setup"}
+                className={`rounded-lg px-3 py-1.5 text-xs font-semibold ${
+                  on ? "bg-secondary text-black" : "bg-primary/15 text-primary"
+                }`}
+              >
+                {m === "test"
+                  ? on
+                    ? "Stop testing"
+                    : "Test"
+                  : on
+                    ? "Exit setup"
+                    : "Set up a console"}
+              </Focusable>
+            );
+          })}
         </div>
+
+        {mode === "idle" && (
+          <p className="mb-3 text-xs text-ink-dim">
+            <span className="font-semibold text-ink">Test</span> verifies a pad is
+            seen by the OS. <span className="font-semibold text-ink">Set up a
+            console</span> maps your pad to a system's buttons and writes it into
+            the emulator. Both lock the controller so it stops moving the menus.
+          </p>
+        )}
+
+        {mode === "test" && (
+          <p className="mb-3 text-xs text-ink-dim">
+            Capturing — app navigation paused. Press{" "}
+            <span className="font-semibold text-ink">Start</span> on the pad, or
+            the button above, to stop.
+          </p>
+        )}
+
+        {mode === "setup" && (
+          <ConsoleSetupControls
+            system={system}
+            onSystem={(s) => {
+              setSystem(s);
+              selectProfile(null);
+            }}
+            profiles={profilesForSystem}
+            activeProfile={activeProfile}
+            onSelectProfile={selectProfile}
+            onCreate={(name) => create.mutate({ name, system })}
+            creating={create.isPending}
+            inputs={inputs}
+            draft={draft}
+            guidedIndex={guidedIndex}
+            singleCapture={singleCapture}
+            guidedLabel={guidedLabel}
+            onRecordAll={recordAll}
+            onArmSingle={armSingle}
+            onSkip={() =>
+              setGuidedIndex((i) =>
+                i === null ? null : i + 1 >= inputs.length ? null : i + 1,
+              )
+            }
+            onStopCapture={stopCapture}
+            onSave={() => save.mutate()}
+            saving={save.isPending}
+            assigned={assigned}
+            onAssign={() => assign.mutate()}
+            onApply={() => apply.mutate()}
+            applying={apply.isPending}
+            onDelete={() => activeProfile && remove.mutate(activeProfile.id)}
+          />
+        )}
 
         {!pad ? (
           <div className="glass flex items-center gap-3 rounded-2xl p-5 text-sm text-ink-dim">
@@ -142,6 +415,266 @@ export function Controller() {
 
       <CompatibilityPanel />
       <ProfilesPanel />
+    </div>
+  );
+}
+
+// The console-setup surface shown inside the tester: profile picker, the live
+// guided capture banner, and the per-console input grid (the "per-console
+// labeling"). It reuses the parent's pad poll + schematic for live feedback.
+function ConsoleSetupControls({
+  system,
+  onSystem,
+  profiles,
+  activeProfile,
+  onSelectProfile,
+  onCreate,
+  creating,
+  inputs,
+  draft,
+  guidedIndex,
+  singleCapture,
+  guidedLabel,
+  onRecordAll,
+  onArmSingle,
+  onSkip,
+  onStopCapture,
+  onSave,
+  saving,
+  assigned,
+  onAssign,
+  onApply,
+  applying,
+  onDelete,
+}: {
+  system: string;
+  onSystem: (s: string) => void;
+  profiles: SystemControllerProfile[];
+  activeProfile: SystemControllerProfile | null;
+  onSelectProfile: (p: SystemControllerProfile | null) => void;
+  onCreate: (name: string) => void;
+  creating: boolean;
+  inputs: ConsoleInput[];
+  draft: Record<string, string>;
+  guidedIndex: number | null;
+  singleCapture: string | null;
+  guidedLabel: string;
+  onRecordAll: () => void;
+  onArmSingle: (id: string) => void;
+  onSkip: () => void;
+  onStopCapture: () => void;
+  onSave: () => void;
+  saving: boolean;
+  assigned: boolean;
+  onAssign: () => void;
+  onApply: () => void;
+  applying: boolean;
+  onDelete: () => void;
+}) {
+  const [name, setName] = useState("");
+  const capturing = guidedIndex !== null || singleCapture !== null;
+  // During a guided walk, the input just recorded (the step before the current
+  // one) — surfaced as immediate confirmation so a mis-press is caught in the
+  // moment rather than only on review.
+  const justCaptured =
+    guidedIndex !== null && guidedIndex > 0 ? inputs[guidedIndex - 1] : null;
+
+  return (
+    <div className="mb-3 flex flex-col gap-3">
+      {/* Profile picker */}
+      <div className="glass flex flex-wrap items-center gap-2 rounded-2xl p-3">
+        <select
+          value={system}
+          onChange={(e) => onSystem(e.target.value)}
+          className="rounded-lg bg-surface-2 px-2 py-1.5 text-sm outline-none"
+        >
+          {SETUP_SYSTEMS.map((s) => (
+            <option key={s.id} value={s.id}>
+              {s.name}
+            </option>
+          ))}
+        </select>
+        {profiles.map((p) => (
+          <Focusable
+            key={p.id}
+            onActivate={() =>
+              onSelectProfile(activeProfile?.id === p.id ? null : p)
+            }
+            ariaLabel={`Select profile ${p.name}`}
+            className={`rounded-lg px-3 py-1.5 text-xs font-semibold ${
+              activeProfile?.id === p.id
+                ? "bg-primary/20 ring-1 ring-primary/50"
+                : "bg-surface-2 text-ink-dim"
+            }`}
+          >
+            {p.name}
+          </Focusable>
+        ))}
+        <input
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && name.trim()) {
+              onCreate(name.trim());
+              setName("");
+            }
+          }}
+          placeholder="New profile…"
+          className="min-w-[7rem] flex-1 bg-transparent px-2 text-sm outline-none placeholder:text-ink-dim"
+        />
+        <Focusable
+          onActivate={() => {
+            if (name.trim()) {
+              onCreate(name.trim());
+              setName("");
+            }
+          }}
+          ariaLabel="Create profile"
+          className="rounded-lg bg-primary px-3 py-1.5 text-xs font-semibold text-black"
+        >
+          {creating ? "…" : "Create"}
+        </Focusable>
+      </div>
+
+      {activeProfile && (
+        <>
+          {/* Guided-capture banner */}
+          {guidedIndex !== null ? (
+            <div className="glass flex items-center gap-3 rounded-2xl border border-primary/40 p-3">
+              <span className="h-2.5 w-2.5 shrink-0 animate-pulse rounded-full bg-primary shadow-glow" />
+              <span className="text-sm">
+                Press the button for{" "}
+                <span className="font-display text-base font-bold text-primary">
+                  {guidedLabel}
+                </span>
+                <span className="ml-2 text-xs text-ink-dim">
+                  {guidedIndex + 1} of {inputs.length}
+                </span>
+              </span>
+              {justCaptured && draft[justCaptured.id] && (
+                <span className="rounded-lg bg-surface-2 px-2 py-1 text-[11px] text-ink-dim">
+                  Saved{" "}
+                  <span className="font-semibold text-ink">
+                    {justCaptured.label}
+                  </span>{" "}
+                  →{" "}
+                  <span className="font-semibold text-ink">
+                    {describeBinding(draft[justCaptured.id])}
+                  </span>
+                  {rawToken(draft[justCaptured.id]) &&
+                    ` (${rawToken(draft[justCaptured.id])})`}
+                </span>
+              )}
+              <span className="flex-1" />
+              <Focusable
+                onActivate={onSkip}
+                ariaLabel="Skip this input"
+                className="rounded-lg px-3 py-1 text-xs text-ink-dim"
+              >
+                Skip
+              </Focusable>
+              <Focusable
+                onActivate={onStopCapture}
+                ariaLabel="Stop recording"
+                className="rounded-lg px-3 py-1 text-xs text-secondary"
+              >
+                Stop
+              </Focusable>
+            </div>
+          ) : (
+            <div className="flex flex-wrap items-center gap-2">
+              <Focusable
+                onActivate={onRecordAll}
+                ariaLabel="Record all buttons in sequence"
+                className="rounded-lg bg-primary px-4 py-1.5 text-sm font-semibold text-black"
+              >
+                Record all buttons
+              </Focusable>
+              <Focusable
+                onActivate={onSave}
+                ariaLabel="Save mapping"
+                className="rounded-lg bg-primary/15 px-4 py-1.5 text-sm font-semibold text-primary"
+              >
+                {saving ? "Saving…" : "Save"}
+              </Focusable>
+              {assigned ? (
+                <span className="rounded-md bg-primary/15 px-2 py-1 text-[11px] font-semibold text-primary">
+                  assigned
+                </span>
+              ) : (
+                <Focusable
+                  onActivate={onAssign}
+                  ariaLabel="Assign to system"
+                  className="rounded-lg px-3 py-1.5 text-sm text-primary"
+                >
+                  Assign to system
+                </Focusable>
+              )}
+              <Focusable
+                onActivate={() =>
+                  assigned
+                    ? onApply()
+                    : undefined
+                }
+                ariaLabel="Write to emulator"
+                className={`rounded-lg px-3 py-1.5 text-sm ${
+                  assigned ? "text-secondary" : "text-ink-dim/40"
+                }`}
+              >
+                {applying ? "Writing…" : "Write to emulator"}
+              </Focusable>
+              <span className="flex-1" />
+              <Focusable
+                onActivate={onDelete}
+                ariaLabel="Delete profile"
+                className="rounded-lg px-3 py-1.5 text-sm text-secondary"
+              >
+                Delete
+              </Focusable>
+            </div>
+          )}
+
+          {/* Per-console input grid (labeling + current bindings) */}
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+            {inputs.map((input, i) => {
+              const arming =
+                singleCapture === input.id || guidedIndex === i;
+              return (
+                <Focusable
+                  key={input.id}
+                  onActivate={() => onArmSingle(input.id)}
+                  ariaLabel={`Capture ${input.label}`}
+                  className={`flex flex-col gap-0.5 rounded-lg px-3 py-2 text-left transition-colors ${
+                    arming
+                      ? "bg-primary/20 ring-1 ring-primary/60"
+                      : "bg-surface-2"
+                  }`}
+                >
+                  <span className="text-xs font-semibold">{input.label}</span>
+                  {arming && capturing ? (
+                    <span className="text-[11px] text-primary">
+                      Press a button…
+                    </span>
+                  ) : draft[input.id] ? (
+                    <span className="flex items-baseline gap-1">
+                      <span className="text-xs font-medium text-ink">
+                        {describeBinding(draft[input.id])}
+                      </span>
+                      {rawToken(draft[input.id]) && (
+                        <span className="text-[10px] text-ink-dim">
+                          {rawToken(draft[input.id])}
+                        </span>
+                      )}
+                    </span>
+                  ) : (
+                    <span className="text-[11px] text-ink-dim">Not set</span>
+                  )}
+                </Focusable>
+              );
+            })}
+          </div>
+        </>
+      )}
     </div>
   );
 }
@@ -553,10 +1086,11 @@ function ProfilesPanel() {
 
   return (
     <section className="mb-6">
-      <h2 className="font-display text-lg font-bold">Mapping Profiles</h2>
+      <h2 className="font-display text-lg font-bold">Menu Navigation Profiles</h2>
       <p className="mb-3 text-xs text-ink-dim">
-        Named binding sets you can switch between. Bindings are stored by Arcadia
-        and passed through to emulators that accept them.
+        Named binding sets for driving Arcadia's own menus with a pad. These are
+        separate from per-console setups — to map a controller into an emulator,
+        use <span className="font-semibold text-ink">Set up a console</span> above.
       </p>
 
       <div className="glass mb-4 flex max-w-sm gap-2 rounded-2xl p-3">

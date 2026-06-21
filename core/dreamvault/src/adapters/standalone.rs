@@ -13,8 +13,13 @@ use super::{
     ScanContext,
 };
 use crate::error::AdapterError;
+use crate::hotkeys::{
+    ini_section_pairs, normalize_key, overlay_defaults, sdl_keysym_name, sdl_scancode_name,
+    EmulatorHotkey, HotkeyAction,
+};
 use crate::save_states::{discover_slots, SaveState};
 use async_trait::async_trait;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// Where an emulator keeps its savestate files, relative to a base it shares
@@ -341,6 +346,263 @@ enum LoadStatePlacement {
     AfterRom,
 }
 
+// ---- Hotkey discovery -----------------------------------------------------
+// Read-only: each scheme points at the emulator's own config file, parses its
+// `action -> key` bindings, and overlays them on a documented defaults table so
+// the panel is useful even when the user never rebound anything.
+
+/// Which root the hotkey config path is relative to. Most emulators live under
+/// the XDG config root (Flatpak-redirected); Mednafen keeps its config in a plain
+/// `~/.mednafen` dotdir, so it resolves against `$HOME` directly.
+enum HotkeyBase {
+    /// `~/.config` (or the Flatpak `~/.var/app/<id>/config` redirect).
+    XdgConfig,
+    /// `$HOME` directly (e.g. Mednafen's `~/.mednafen/mednafen.cfg`).
+    Home,
+}
+
+/// How one emulator stores its keyboard hotkeys: the base root + relative config
+/// path, the documented defaults to fall back on, and a pure parser turning the
+/// file's text into a canonical `action -> binding` map.
+struct HotkeyScheme {
+    base: HotkeyBase,
+    /// Config file path relative to `base`.
+    rel_path: &'static str,
+    defaults: &'static [(HotkeyAction, &'static str)],
+    parse: fn(&str) -> HashMap<HotkeyAction, String>,
+}
+
+impl HotkeyScheme {
+    /// Resolve the absolute config file path, applying the Flatpak redirect for
+    /// XDG-config schemes. `None` when `$HOME` is unset.
+    fn path(&self, flatpak_app_id: Option<&str>) -> Option<PathBuf> {
+        let base = match self.base {
+            HotkeyBase::XdgConfig => xdg_base(flatpak_app_id, true)?,
+            HotkeyBase::Home => PathBuf::from(std::env::var_os("HOME")?),
+        };
+        Some(base.join(self.rel_path))
+    }
+}
+
+/// PCSX2/DuckStation value form `Keyboard/<Key>`, combos joined with ` & `, e.g.
+/// `Keyboard/Alt & Keyboard/Return`. Drop the `Keyboard/` device prefix from each
+/// token, normalize, and re-join with ` + `. Empty when no token survives.
+fn parse_device_combo(raw: &str) -> String {
+    raw.split('&')
+        .filter_map(|tok| {
+            let key = tok.trim().rsplit('/').next()?.trim();
+            let n = normalize_key(key);
+            (!n.is_empty()).then_some(n)
+        })
+        .collect::<Vec<_>>()
+        .join(" + ")
+}
+
+/// Dolphin value form: backtick-wrapped keys, combos joined with `&`, e.g.
+/// `` `Alt`&`Return` `` or `` `F5` ``. Strip backticks, split on `&`, normalize,
+/// re-join with ` + `.
+fn parse_backtick_combo(raw: &str) -> String {
+    raw.replace('`', "")
+        .split('&')
+        .filter_map(|tok| {
+            let n = normalize_key(tok.trim());
+            (!n.is_empty()).then_some(n)
+        })
+        .collect::<Vec<_>>()
+        .join(" + ")
+}
+
+/// Scan a `[section]` of an INI config, matching each `key -> action` in
+/// `keymap` and normalizing its value with `value`. Shared by every `[Hotkeys]`
+/// emulator; only the key map and value grammar differ.
+fn map_ini_hotkeys(
+    text: &str,
+    section: &str,
+    keymap: &[(&str, HotkeyAction)],
+    value: fn(&str) -> String,
+) -> HashMap<HotkeyAction, String> {
+    let mut out = HashMap::new();
+    for (k, v) in ini_section_pairs(text, section) {
+        if let Some((_, action)) = keymap.iter().find(|(name, _)| *name == k) {
+            let binding = value(&v);
+            if !binding.is_empty() {
+                out.insert(*action, binding);
+            }
+        }
+    }
+    out
+}
+
+const PCSX2_HOTKEY_MAP: &[(&str, HotkeyAction)] = &[
+    ("SaveStateToSlot", HotkeyAction::SaveState),
+    ("LoadStateFromSlot", HotkeyAction::LoadState),
+    ("NextSaveStateSlot", HotkeyAction::NextSlot),
+    ("PreviousSaveStateSlot", HotkeyAction::PrevSlot),
+    ("Screenshot", HotkeyAction::Screenshot),
+    ("TogglePause", HotkeyAction::Pause),
+    ("HoldTurbo", HotkeyAction::FastForwardHold),
+    ("ToggleTurbo", HotkeyAction::FastForwardToggle),
+    ("ToggleFullscreen", HotkeyAction::ToggleFullscreen),
+    ("OpenPauseMenu", HotkeyAction::ToggleMenu),
+];
+
+fn parse_pcsx2_hotkeys(text: &str) -> HashMap<HotkeyAction, String> {
+    map_ini_hotkeys(text, "Hotkeys", PCSX2_HOTKEY_MAP, parse_device_combo)
+}
+
+const DUCKSTATION_HOTKEY_MAP: &[(&str, HotkeyAction)] = &[
+    ("SaveSelectedSaveState", HotkeyAction::SaveState),
+    ("LoadSelectedSaveState", HotkeyAction::LoadState),
+    ("SelectNextSaveStateSlot", HotkeyAction::NextSlot),
+    ("SelectPreviousSaveStateSlot", HotkeyAction::PrevSlot),
+    ("Screenshot", HotkeyAction::Screenshot),
+    ("TogglePause", HotkeyAction::Pause),
+    ("FastForward", HotkeyAction::FastForwardHold),
+    ("ToggleFullscreen", HotkeyAction::ToggleFullscreen),
+    ("OpenPauseMenu", HotkeyAction::ToggleMenu),
+];
+
+fn parse_duckstation_hotkeys(text: &str) -> HashMap<HotkeyAction, String> {
+    map_ini_hotkeys(text, "Hotkeys", DUCKSTATION_HOTKEY_MAP, parse_device_combo)
+}
+
+const DOLPHIN_HOTKEY_MAP: &[(&str, HotkeyAction)] = &[
+    ("Save State/Save to Selected Slot", HotkeyAction::SaveState),
+    ("Load State/Load from Selected Slot", HotkeyAction::LoadState),
+    ("General/Take Screenshot", HotkeyAction::Screenshot),
+    ("General/Toggle Pause", HotkeyAction::Pause),
+    ("General/Toggle Fullscreen", HotkeyAction::ToggleFullscreen),
+    ("General/Stop", HotkeyAction::Exit),
+];
+
+fn parse_dolphin_hotkeys(text: &str) -> HashMap<HotkeyAction, String> {
+    map_ini_hotkeys(text, "Hotkeys", DOLPHIN_HOTKEY_MAP, parse_backtick_combo)
+}
+
+const MUPEN_HOTKEY_MAP: &[(&str, HotkeyAction)] = &[
+    ("Kbd Mapping Save State", HotkeyAction::SaveState),
+    ("Kbd Mapping Load State", HotkeyAction::LoadState),
+    ("Kbd Mapping Increment Slot", HotkeyAction::NextSlot),
+    ("Kbd Mapping Screenshot", HotkeyAction::Screenshot),
+    ("Kbd Mapping Pause", HotkeyAction::Pause),
+    ("Kbd Mapping Fast Forward", HotkeyAction::FastForwardHold),
+    ("Kbd Mapping Reset", HotkeyAction::Reset),
+    ("Kbd Mapping Stop", HotkeyAction::Exit),
+    ("Kbd Mapping Fullscreen", HotkeyAction::ToggleFullscreen),
+];
+
+/// Mupen64Plus `[CoreEvents]`: each value is an SDL *keysym* integer (sometimes
+/// quoted). Translate via [`sdl_keysym_name`]; `0`/unknown yields empty so the
+/// action falls back to its documented default.
+fn parse_mupen_keysym(raw: &str) -> String {
+    match raw.trim().trim_matches('"').parse::<u32>() {
+        Ok(n) => sdl_keysym_name(n),
+        Err(_) => String::new(),
+    }
+}
+
+fn parse_mupen_hotkeys(text: &str) -> HashMap<HotkeyAction, String> {
+    map_ini_hotkeys(text, "CoreEvents", MUPEN_HOTKEY_MAP, parse_mupen_keysym)
+}
+
+const MEDNAFEN_HOTKEY_MAP: &[(&str, HotkeyAction)] = &[
+    ("command.save_state", HotkeyAction::SaveState),
+    ("command.load_state", HotkeyAction::LoadState),
+    ("command.state_slot_inc", HotkeyAction::NextSlot),
+    ("command.state_slot_dec", HotkeyAction::PrevSlot),
+    ("command.take_snapshot", HotkeyAction::Screenshot),
+    ("command.pause", HotkeyAction::Pause),
+    ("command.fast_forward", HotkeyAction::FastForwardHold),
+    ("command.reset", HotkeyAction::Reset),
+    ("command.exit", HotkeyAction::Exit),
+];
+
+/// Mednafen's `mednafen.cfg` is flat whitespace-delimited lines, not INI
+/// sections: `command.<action> keyboard 0x0 <SDL scancode>`. Match the action,
+/// require the `keyboard` device, and translate the trailing scancode via
+/// [`sdl_scancode_name`].
+fn parse_mednafen_hotkeys(text: &str) -> HashMap<HotkeyAction, String> {
+    let mut out = HashMap::new();
+    for line in text.lines() {
+        let mut toks = line.split_whitespace();
+        let Some(key) = toks.next() else { continue };
+        let Some((_, action)) = MEDNAFEN_HOTKEY_MAP.iter().find(|(name, _)| *name == key) else {
+            continue;
+        };
+        let rest: Vec<&str> = toks.collect();
+        if rest.first() != Some(&"keyboard") {
+            continue;
+        }
+        if let Some(code) = rest.last().and_then(|c| c.parse::<u32>().ok()) {
+            let binding = sdl_scancode_name(code);
+            if !binding.is_empty() {
+                out.insert(*action, binding);
+            }
+        }
+    }
+    out
+}
+
+/// A GTK accelerator string (`<Shift><Control>F1`, `<Control>s`, `F5`) as written
+/// by snes9x-gtk's `[Shortcuts]`. Pull out the leading `<Mod>` tokens, normalize
+/// the trailing key, and re-join with ` + `. `Unset`/empty → empty (unbound).
+fn parse_gtk_accel(raw: &str) -> String {
+    let raw = raw.trim();
+    if raw.is_empty() || raw.eq_ignore_ascii_case("unset") {
+        return String::new();
+    }
+    let mut mods = Vec::new();
+    let mut rest = raw;
+    while let Some(open) = rest.find('<') {
+        let Some(close_rel) = rest[open..].find('>') else { break };
+        let name = &rest[open + 1..open + close_rel];
+        let label = match name.to_ascii_lowercase().as_str() {
+            "shift" => "Shift",
+            "control" | "ctrl" | "primary" => "Ctrl",
+            "alt" | "mod1" => "Alt",
+            "super" => "Super",
+            _ => "",
+        };
+        if !label.is_empty() {
+            mods.push(label.to_string());
+        }
+        rest = &rest[open + close_rel + 1..];
+    }
+    let key = normalize_key(rest.trim());
+    if key.is_empty() {
+        return String::new();
+    }
+    mods.push(key);
+    mods.join(" + ")
+}
+
+const SNES9X_HOTKEY_MAP: &[(&str, HotkeyAction)] = &[
+    ("GTK_state_save_current", HotkeyAction::SaveState),
+    ("GTK_state_load_current", HotkeyAction::LoadState),
+    ("GTK_state_increment", HotkeyAction::NextSlot),
+    ("GTK_state_decrement", HotkeyAction::PrevSlot),
+    ("Screenshot", HotkeyAction::Screenshot),
+    ("GTK_pause", HotkeyAction::Pause),
+    ("GTK_fullscreen", HotkeyAction::ToggleFullscreen),
+    ("GTK_rewind", HotkeyAction::Rewind),
+    ("GTK_quit", HotkeyAction::Exit),
+];
+
+/// snes9x-gtk `[Shortcuts]`: GTK accelerator strings. snes9x ships these all
+/// `Unset` (no compiled defaults), so this is an *override-only* reader — it
+/// surfaces whatever the user has bound and the panel stays hidden until they
+/// bind something.
+fn parse_snes9x_hotkeys(text: &str) -> HashMap<HotkeyAction, String> {
+    map_ini_hotkeys(text, "Shortcuts", SNES9X_HOTKEY_MAP, parse_gtk_accel)
+}
+
+/// For emulators whose config stores overrides in a form we don't translate yet
+/// (e.g. mGBA's Qt keycodes): read nothing, leaning entirely on the defaults
+/// table. The config existing or not makes no difference to the result.
+fn no_hotkey_overrides(_text: &str) -> HashMap<HotkeyAction, String> {
+    HashMap::new()
+}
+
 /// Static description of one standalone emulator.
 struct Spec {
     id: &'static str,
@@ -355,6 +617,9 @@ struct Spec {
     /// emulators we can't yet index reliably — e.g. Mupen64Plus keys states by
     /// the ROM's internal name + CRC, which needs N64-header parsing we don't do.
     save_states: Option<SaveStateScheme>,
+    /// How (and whether) this emulator's keyboard hotkeys are read. `None` leaves
+    /// the panel hidden (the default-empty `scan_hotkeys`).
+    hotkeys: Option<HotkeyScheme>,
 }
 
 pub struct StandaloneAdapter {
@@ -388,6 +653,15 @@ impl StandaloneAdapter {
                 parse: parse_snes9x,
                 learn: None,
             }),
+            // `[Shortcuts]` GTK accelerators in `snes9x/snes9x.conf`. snes9x ships
+            // them all `Unset` (no compiled defaults), so this is override-only
+            // with an empty defaults table — hidden until the user binds keys.
+            hotkeys: Some(HotkeyScheme {
+                base: HotkeyBase::XdgConfig,
+                rel_path: "snes9x/snes9x.conf",
+                defaults: &[],
+                parse: parse_snes9x_hotkeys,
+            }),
         })
     }
 
@@ -416,6 +690,15 @@ impl StandaloneAdapter {
                 key: KeyKind::Stem,
                 parse: parse_mgba,
                 learn: None,
+            }),
+            // mGBA's `[shortcutKey]` is empty by default and stores overrides as
+            // Qt keycodes we don't translate yet, so lean on the documented
+            // slot-1 save/load defaults.
+            hotkeys: Some(HotkeyScheme {
+                base: HotkeyBase::XdgConfig,
+                rel_path: "mgba/config.ini",
+                defaults: crate::hotkeys::MGBA_DEFAULTS,
+                parse: no_hotkey_overrides,
             }),
         })
     }
@@ -450,6 +733,14 @@ impl StandaloneAdapter {
                 parse: parse_mupen,
                 learn: Some(learn_mupen_base),
             }),
+            // `[CoreEvents]` `Kbd Mapping <Action>` in `mupen64plus.cfg`; values
+            // are SDL keysym integers.
+            hotkeys: Some(HotkeyScheme {
+                base: HotkeyBase::XdgConfig,
+                rel_path: "mupen64plus/mupen64plus.cfg",
+                defaults: crate::hotkeys::MUPEN_DEFAULTS,
+                parse: parse_mupen_hotkeys,
+            }),
         })
     }
 
@@ -476,6 +767,14 @@ impl StandaloneAdapter {
                 key: KeyKind::DiscKey,
                 parse: parse_dolphin,
                 learn: Some(learn_dolphin_game_id),
+            }),
+            // `[Hotkeys]` in `dolphin-emu/Hotkeys.ini`, compound `Category/Name`
+            // keys with backtick-wrapped values.
+            hotkeys: Some(HotkeyScheme {
+                base: HotkeyBase::XdgConfig,
+                rel_path: "dolphin-emu/Hotkeys.ini",
+                defaults: crate::hotkeys::DOLPHIN_DEFAULTS,
+                parse: parse_dolphin_hotkeys,
             }),
         })
     }
@@ -505,6 +804,13 @@ impl StandaloneAdapter {
                 parse: parse_pcsx2,
                 learn: Some(learn_pcsx2_serial),
             }),
+            // `[Hotkeys]` in `PCSX2/inis/PCSX2.ini`, values `Keyboard/<Key>`.
+            hotkeys: Some(HotkeyScheme {
+                base: HotkeyBase::XdgConfig,
+                rel_path: "PCSX2/inis/PCSX2.ini",
+                defaults: crate::hotkeys::PCSX2_DEFAULTS,
+                parse: parse_pcsx2_hotkeys,
+            }),
         })
     }
 
@@ -525,6 +831,7 @@ impl StandaloneAdapter {
             // PPSSPP keys states by a content id under its own memstick tree;
             // not yet mapped.
             save_states: None,
+            hotkeys: None,
         })
     }
 
@@ -546,6 +853,7 @@ impl StandaloneAdapter {
             args: |rom| vec!["--no-gui".into(), rom.to_string()],
             // RPCS3 has no user-facing savestates (capability is false).
             save_states: None,
+            hotkeys: None,
         })
     }
 
@@ -577,6 +885,14 @@ impl StandaloneAdapter {
                 // serial from DuckStation's own writes after a session.
                 learn: Some(learn_duckstation_serial),
             }),
+            // `[Hotkeys]` in `duckstation/settings.ini`, same `Keyboard/<Key>`
+            // grammar as PCSX2.
+            hotkeys: Some(HotkeyScheme {
+                base: HotkeyBase::XdgConfig,
+                rel_path: "duckstation/settings.ini",
+                defaults: crate::hotkeys::DUCKSTATION_DEFAULTS,
+                parse: parse_duckstation_hotkeys,
+            }),
         })
     }
 
@@ -606,6 +922,7 @@ impl StandaloneAdapter {
                 parse: parse_melonds,
                 learn: None,
             }),
+            hotkeys: None,
         })
     }
 
@@ -634,6 +951,7 @@ impl StandaloneAdapter {
                 parse: parse_flycast,
                 learn: None,
             }),
+            hotkeys: None,
         })
     }
 
@@ -666,6 +984,7 @@ impl StandaloneAdapter {
                 vec!["-rompath".into(), dir, set]
             },
             save_states: None,
+            hotkeys: None,
         })
     }
 
@@ -685,6 +1004,7 @@ impl StandaloneAdapter {
             // xemu takes the disc image as a virtual DVD.
             args: |rom| vec!["-dvd_path".into(), rom.to_string()],
             save_states: None,
+            hotkeys: None,
         })
     }
 
@@ -704,6 +1024,7 @@ impl StandaloneAdapter {
             // -f: fullscreen, -g: game to launch.
             args: |rom| vec!["-f".into(), "-g".into(), rom.to_string()],
             save_states: None,
+            hotkeys: None,
         })
     }
 
@@ -722,6 +1043,7 @@ impl StandaloneAdapter {
             },
             args: |rom| vec![rom.to_string()],
             save_states: None,
+            hotkeys: None,
         })
     }
 
@@ -740,6 +1062,7 @@ impl StandaloneAdapter {
             },
             args: |rom| vec![rom.to_string()],
             save_states: None,
+            hotkeys: None,
         })
     }
 
@@ -758,6 +1081,7 @@ impl StandaloneAdapter {
             },
             args: |rom| vec![rom.to_string()],
             save_states: None,
+            hotkeys: None,
         })
     }
 
@@ -792,6 +1116,7 @@ impl StandaloneAdapter {
             },
             args,
             save_states: None,
+            hotkeys: None,
         })
     }
 
@@ -830,6 +1155,14 @@ impl StandaloneAdapter {
                 parse: parse_mednafen,
                 learn: None,
             }),
+            // Flat `command.<action> keyboard 0x0 <SDL scancode>` lines in
+            // `~/.mednafen/mednafen.cfg` (a plain dotdir, not XDG config).
+            hotkeys: Some(HotkeyScheme {
+                base: HotkeyBase::Home,
+                rel_path: ".mednafen/mednafen.cfg",
+                defaults: crate::hotkeys::MEDNAFEN_DEFAULTS,
+                parse: parse_mednafen_hotkeys,
+            }),
         })
     }
 
@@ -855,6 +1188,7 @@ impl StandaloneAdapter {
                 parse: parse_mesen,
                 learn: None,
             }),
+            hotkeys: None,
         })
     }
 
@@ -894,6 +1228,7 @@ impl StandaloneAdapter {
                 parse: parse_blastem,
                 learn: None,
             }),
+            hotkeys: None,
         })
     }
 
@@ -1146,6 +1481,21 @@ impl EmulatorAdapter for StandaloneAdapter {
         Ok(discover_slots(&dir, move |name| parse(name, &key)))
     }
 
+    async fn scan_hotkeys(&self, ctx: &ScanContext) -> Result<Vec<EmulatorHotkey>, AdapterError> {
+        let Some(scheme) = &self.spec.hotkeys else {
+            return Ok(Vec::new());
+        };
+        let Some(path) = scheme.path(ctx.flatpak_app_id.as_deref()) else {
+            return Ok(Vec::new());
+        };
+        // A missing/unreadable config is fine: overlay an empty map so the panel
+        // still shows the emulator's documented defaults.
+        let parsed = std::fs::read_to_string(&path)
+            .map(|t| (scheme.parse)(&t))
+            .unwrap_or_default();
+        Ok(overlay_defaults(scheme.defaults, &parsed))
+    }
+
     async fn learn_state_key(
         &self,
         ctx: &ScanContext,
@@ -1163,6 +1513,171 @@ impl EmulatorAdapter for StandaloneAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pcsx2_hotkeys_parse_from_real_section() {
+        // Real `[Hotkeys]` block (Appendix A). `Keyboard/` prefix dropped, combos
+        // re-joined with ` + `.
+        let ini = "\
+[UI]
+Theme = dark
+[Hotkeys]
+SaveStateToSlot = Keyboard/F1
+LoadStateFromSlot = Keyboard/F3
+PreviousSaveStateSlot = Keyboard/Shift & Keyboard/F2
+ToggleFullscreen = Keyboard/Alt & Keyboard/Return
+OpenPauseMenu = Keyboard/Escape
+";
+        let m = parse_pcsx2_hotkeys(ini);
+        assert_eq!(m.get(&HotkeyAction::SaveState).map(String::as_str), Some("F1"));
+        assert_eq!(m.get(&HotkeyAction::LoadState).map(String::as_str), Some("F3"));
+        assert_eq!(m.get(&HotkeyAction::PrevSlot).map(String::as_str), Some("Shift + F2"));
+        assert_eq!(
+            m.get(&HotkeyAction::ToggleFullscreen).map(String::as_str),
+            Some("Alt + Return")
+        );
+        assert_eq!(m.get(&HotkeyAction::ToggleMenu).map(String::as_str), Some("Esc"));
+    }
+
+    #[test]
+    fn duckstation_hotkeys_share_grammar_distinct_keys() {
+        let ini = "\
+[Hotkeys]
+SaveSelectedSaveState = Keyboard/F2
+LoadSelectedSaveState = Keyboard/F1
+FastForward = Keyboard/Tab
+ToggleFullscreen = Keyboard/F11
+";
+        let m = parse_duckstation_hotkeys(ini);
+        assert_eq!(m.get(&HotkeyAction::SaveState).map(String::as_str), Some("F2"));
+        assert_eq!(m.get(&HotkeyAction::LoadState).map(String::as_str), Some("F1"));
+        assert_eq!(
+            m.get(&HotkeyAction::FastForwardHold).map(String::as_str),
+            Some("Tab")
+        );
+        assert_eq!(
+            m.get(&HotkeyAction::ToggleFullscreen).map(String::as_str),
+            Some("F11")
+        );
+    }
+
+    #[test]
+    fn dolphin_hotkeys_strip_backticks_and_skip_device() {
+        // Real `[Hotkeys]` block: compound keys, backtick values, combos on `&`.
+        let ini = "\
+[Hotkeys]
+Device = DInput/0/Keyboard Mouse
+Save State/Save to Selected Slot = `F5`
+Load State/Load from Selected Slot = `F7`
+General/Toggle Fullscreen = `Alt`&`Return`
+General/Stop = `Escape`
+";
+        let m = parse_dolphin_hotkeys(ini);
+        assert_eq!(m.get(&HotkeyAction::SaveState).map(String::as_str), Some("F5"));
+        assert_eq!(m.get(&HotkeyAction::LoadState).map(String::as_str), Some("F7"));
+        assert_eq!(
+            m.get(&HotkeyAction::ToggleFullscreen).map(String::as_str),
+            Some("Alt + Return")
+        );
+        assert_eq!(m.get(&HotkeyAction::Exit).map(String::as_str), Some("Esc"));
+        // The `Device =` line is not a hotkey.
+        assert_eq!(m.len(), 4);
+    }
+
+    #[test]
+    fn mupen_hotkeys_translate_sdl_keysyms() {
+        // Real `[CoreEvents]` block (verified values). Values are SDL keysyms;
+        // `0` (Increment Slot / Fullscreen) is unbound → dropped, falls to default.
+        let ini = "\
+[Core]
+Version = 1
+[CoreEvents]
+Kbd Mapping Save State = 286
+Kbd Mapping Load State = 288
+Kbd Mapping Increment Slot = 0
+Kbd Mapping Screenshot = 293
+Kbd Mapping Pause = 112
+Kbd Mapping Fast Forward = 102
+Kbd Mapping Stop = 27
+Kbd Mapping Reset = 290
+Kbd Mapping Fullscreen = 0
+";
+        let m = parse_mupen_hotkeys(ini);
+        assert_eq!(m.get(&HotkeyAction::SaveState).map(String::as_str), Some("F5"));
+        assert_eq!(m.get(&HotkeyAction::LoadState).map(String::as_str), Some("F7"));
+        assert_eq!(m.get(&HotkeyAction::Screenshot).map(String::as_str), Some("F12"));
+        assert_eq!(m.get(&HotkeyAction::Pause).map(String::as_str), Some("P"));
+        assert_eq!(
+            m.get(&HotkeyAction::FastForwardHold).map(String::as_str),
+            Some("F")
+        );
+        assert_eq!(m.get(&HotkeyAction::Exit).map(String::as_str), Some("Esc"));
+        assert_eq!(m.get(&HotkeyAction::Reset).map(String::as_str), Some("F9"));
+        // Unbound (`0`) actions are absent.
+        assert!(m.get(&HotkeyAction::NextSlot).is_none());
+        assert!(m.get(&HotkeyAction::ToggleFullscreen).is_none());
+    }
+
+    #[test]
+    fn mednafen_hotkeys_translate_sdl_scancodes() {
+        // Real flat `command.<action> keyboard 0x0 <scancode>` lines (verified).
+        let cfg = "\
+command.exit keyboard 0x0 69
+command.fast_forward keyboard 0x0 53
+command.load_state keyboard 0x0 64
+command.pause keyboard 0x0 72
+command.reset keyboard 0x0 67
+command.save_state keyboard 0x0 62
+command.state_slot_dec keyboard 0x0 45
+command.state_slot_inc keyboard 0x0 46
+command.take_snapshot keyboard 0x0 66
+video.fs 0
+";
+        let m = parse_mednafen_hotkeys(cfg);
+        assert_eq!(m.get(&HotkeyAction::SaveState).map(String::as_str), Some("F5"));
+        assert_eq!(m.get(&HotkeyAction::LoadState).map(String::as_str), Some("F7"));
+        assert_eq!(m.get(&HotkeyAction::NextSlot).map(String::as_str), Some("="));
+        assert_eq!(m.get(&HotkeyAction::PrevSlot).map(String::as_str), Some("-"));
+        assert_eq!(m.get(&HotkeyAction::Screenshot).map(String::as_str), Some("F9"));
+        assert_eq!(m.get(&HotkeyAction::Pause).map(String::as_str), Some("Pause"));
+        assert_eq!(
+            m.get(&HotkeyAction::FastForwardHold).map(String::as_str),
+            Some("`")
+        );
+        assert_eq!(m.get(&HotkeyAction::Reset).map(String::as_str), Some("F10"));
+        assert_eq!(m.get(&HotkeyAction::Exit).map(String::as_str), Some("F12"));
+        // The unrelated `video.fs` line is ignored.
+        assert_eq!(m.len(), 9);
+    }
+
+    #[test]
+    fn snes9x_gtk_accelerators_parse_and_skip_unset() {
+        // `[Shortcuts]` GTK accel strings; all-`Unset` is the stock state.
+        let conf = "\
+[Joypad 0]
+A = Unset
+[Shortcuts]
+GTK_state_save_current   = <Shift>F1
+GTK_state_load_current   = F1
+GTK_fullscreen           = <Control><Alt>F
+GTK_pause                = Unset
+Screenshot               = Unset
+";
+        let m = parse_snes9x_hotkeys(conf);
+        assert_eq!(
+            m.get(&HotkeyAction::SaveState).map(String::as_str),
+            Some("Shift + F1")
+        );
+        assert_eq!(m.get(&HotkeyAction::LoadState).map(String::as_str), Some("F1"));
+        assert_eq!(
+            m.get(&HotkeyAction::ToggleFullscreen).map(String::as_str),
+            Some("Ctrl + Alt + F")
+        );
+        // `Unset` bindings are dropped (not surfaced as empty rows).
+        assert!(m.get(&HotkeyAction::Pause).is_none());
+        assert!(m.get(&HotkeyAction::Screenshot).is_none());
+        assert_eq!(m.len(), 3);
+    }
 
     #[test]
     fn pcsx2_filenames_map_to_slots() {

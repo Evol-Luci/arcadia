@@ -13,9 +13,11 @@ use super::{
     ScanContext,
 };
 use crate::error::AdapterError;
+use crate::hotkeys::{normalize_key, overlay_defaults, EmulatorHotkey, HotkeyAction};
 use crate::save_states::{discover_save_states, SaveState};
 use crate::saves::retroarch_save_dirs;
 use async_trait::async_trait;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 pub struct RetroArchAdapter;
@@ -139,6 +141,67 @@ impl EmulatorAdapter for RetroArchAdapter {
         }
         Ok(discover_save_states(states_dir, stem))
     }
+
+    /// RetroArch keeps hotkeys as top-level `input_<action> = "<key>"` lines in
+    /// `retroarch.cfg`. We parse those and overlay them on RetroArch's documented
+    /// defaults; an unbound (`"nul"`) or absent entry falls back to the default.
+    /// Keyboard-only: every hotkey's `_btn`/`_axis` joypad sibling is `"nul"` on a
+    /// stock config, so there are no honest controller bindings to surface.
+    async fn scan_hotkeys(&self, ctx: &ScanContext) -> Result<Vec<EmulatorHotkey>, AdapterError> {
+        let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+            return Ok(Vec::new());
+        };
+        let cfg = match ctx.flatpak_app_id.as_deref() {
+            Some(app) => home
+                .join(".var/app")
+                .join(app)
+                .join("config/retroarch/retroarch.cfg"),
+            None => home.join(".config/retroarch/retroarch.cfg"),
+        };
+        let parsed = std::fs::read_to_string(&cfg)
+            .map(|t| parse_retroarch_hotkeys(&t))
+            .unwrap_or_default();
+        Ok(overlay_defaults(crate::hotkeys::RETROARCH_DEFAULTS, &parsed))
+    }
+}
+
+/// RetroArch's `input_<action>` config keys mapped to canonical actions. The
+/// stable left column is the join key; the value is a quoted key name (`"f2"`).
+const RETROARCH_HOTKEY_MAP: &[(&str, HotkeyAction)] = &[
+    ("input_save_state", HotkeyAction::SaveState),
+    ("input_load_state", HotkeyAction::LoadState),
+    ("input_state_slot_increase", HotkeyAction::NextSlot),
+    ("input_state_slot_decrease", HotkeyAction::PrevSlot),
+    ("input_screenshot", HotkeyAction::Screenshot),
+    ("input_pause_toggle", HotkeyAction::Pause),
+    ("input_hold_fast_forward", HotkeyAction::FastForwardHold),
+    ("input_toggle_fast_forward", HotkeyAction::FastForwardToggle),
+    ("input_rewind", HotkeyAction::Rewind),
+    ("input_menu_toggle", HotkeyAction::ToggleMenu),
+    ("input_exit_emulator", HotkeyAction::Exit),
+    ("input_reset", HotkeyAction::Reset),
+];
+
+/// Parse `retroarch.cfg`'s flat `input_<action> = "<key>"` lines into a canonical
+/// `action -> binding` map, skipping the unbound `"nul"` sentinel. Pure over the
+/// text for testing.
+fn parse_retroarch_hotkeys(text: &str) -> HashMap<HotkeyAction, String> {
+    let mut out = HashMap::new();
+    for line in text.lines() {
+        let Some((k, v)) = line.split_once('=') else {
+            continue;
+        };
+        let k = k.trim();
+        let Some((_, action)) = RETROARCH_HOTKEY_MAP.iter().find(|(name, _)| *name == k) else {
+            continue;
+        };
+        let key = v.trim().trim_matches('"');
+        let binding = normalize_key(key);
+        if !binding.is_empty() {
+            out.insert(*action, binding);
+        }
+    }
+    out
 }
 
 /// Platforms RetroArch advertises, i.e. every platform with at least one core in
@@ -308,6 +371,25 @@ mod tests {
 
         // A platform whose core isn't in the search dirs => None (content-only).
         assert!(first_core_in_dirs(core_candidates("n64"), &dirs).is_none());
+    }
+
+    #[test]
+    fn parses_retroarch_hotkeys_and_skips_unbound() {
+        let cfg = "\
+input_save_state = \"f2\"
+input_load_state = \"f4\"
+input_exit_emulator = \"escape\"
+input_pause_toggle = \"p\"
+input_state_slot_increase = \"nul\"
+unrelated_setting = \"f9\"
+";
+        let map = parse_retroarch_hotkeys(cfg);
+        assert_eq!(map.get(&HotkeyAction::SaveState).map(String::as_str), Some("F2"));
+        assert_eq!(map.get(&HotkeyAction::LoadState).map(String::as_str), Some("F4"));
+        assert_eq!(map.get(&HotkeyAction::Exit).map(String::as_str), Some("Esc"));
+        assert_eq!(map.get(&HotkeyAction::Pause).map(String::as_str), Some("P"));
+        // `nul` is unbound → absent (falls back to the default in the overlay).
+        assert!(!map.contains_key(&HotkeyAction::NextSlot));
     }
 
     #[test]

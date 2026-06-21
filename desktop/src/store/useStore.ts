@@ -5,6 +5,7 @@ export type View =
   | "home"
   | "library"
   | "recent"
+  | "favorites"
   | "collections"
   | "screenshots"
   | "achievements"

@@ -45,11 +45,19 @@ export async function startGamepadBridge(): Promise<() => void> {
   if (!installed) {
     const native = navigator.getGamepads?.bind(navigator);
     navigator.getGamepads = function () {
+      // Prefer the Rust/gilrs snapshot whenever we have one: it is the
+      // authoritative, kernel-quirk-corrected source this bridge exists for.
+      // WebKitGTK's *native* Linux gamepad mapping reads the positionally
+      // misnamed evdev face-button codes (BTN_NORTH=0x133 is physically X,
+      // BTN_WEST=0x134 is physically Y) without SDL-style correction, so it
+      // reports X/Y swapped on Xbox pads. Only fall back to native when gilrs
+      // has nothing to offer (e.g. a platform where the Rust poller is idle).
+      if (snapshots.length > 0) return snapshots.map(toGamepad);
       if (native) {
         const live = Array.from(native()).filter(Boolean);
         if (live.length > 0) return native();
       }
-      return snapshots.map(toGamepad);
+      return [];
     } as typeof navigator.getGamepads;
     installed = true;
   }

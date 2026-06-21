@@ -337,6 +337,32 @@ impl Engine {
         })
     }
 
+    /// Close any play sessions left open by a previous run.
+    ///
+    /// A session's `ended_at` is written when the emulator process exits. If
+    /// the emulator crashed, was force-killed, or Arcadia itself was closed
+    /// mid-play, that write never happens and the row stays "open" forever.
+    /// Stale open rows permanently trip the controller-config write guard —
+    /// `apply_system_controller_profile` counts `ended_at IS NULL` sessions to
+    /// detect a running emulator — and corrupt any "now playing" UI derived
+    /// from them.
+    ///
+    /// We run this at engine construction. Nothing Arcadia launched in a prior
+    /// process can still be running, so every open session is stale. We close
+    /// them with `ended_at = started_at`: an honest zero-duration record (we
+    /// never observed the real end, so we don't invent playtime). Returns the
+    /// number of rows healed.
+    pub(crate) async fn reconcile_open_sessions(&self) -> Result<u64> {
+        let healed = sqlx::query("UPDATE play_sessions SET ended_at = started_at WHERE ended_at IS NULL")
+            .execute(&self.pool)
+            .await?
+            .rows_affected();
+        if healed > 0 {
+            tracing::warn!(healed, "closed orphaned play sessions left open by a prior run");
+        }
+        Ok(healed)
+    }
+
     /// Aggregate dashboard statistics for a profile.
     pub async fn library_stats(&self, profile_id: &str) -> Result<LibraryStats> {
         let mut stats = LibraryStats::default();

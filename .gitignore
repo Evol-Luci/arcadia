@@ -24,7 +24,9 @@ packaging/**/src/
 packaging/**/*.pkg.tar.zst
 packaging/**/*.rpm
 packaging/.flatpak-builder/
+packaging/flatpak/.flatpak-builder/
 packaging/build/
+packaging/flatpak/build/
 packaging/repo/
 packaging/*.flatpak
 packaging/*.tar.gz

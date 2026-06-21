@@ -5,6 +5,7 @@ const ITEMS: { view: View; label: string; icon: string }[] = [
   { view: "home", label: "Home", icon: "◈" },
   { view: "library", label: "Library", icon: "▦" },
   { view: "recent", label: "Recent", icon: "↺" },
+  { view: "favorites", label: "Favorites", icon: "☆" },
   { view: "collections", label: "Collections", icon: "❏" },
   { view: "screenshots", label: "Screenshots", icon: "▢" },
   { view: "achievements", label: "Achievements", icon: "★" },

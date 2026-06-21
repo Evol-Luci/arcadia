@@ -15,6 +15,7 @@ mod standalone;
 pub mod detect;
 
 use crate::error::AdapterError;
+use crate::hotkeys::EmulatorHotkey;
 use crate::models::InstallSource;
 use crate::save_states::SaveState;
 use async_trait::async_trait;
@@ -155,6 +156,16 @@ pub trait EmulatorAdapter: Send + Sync {
     /// rewriting) the emulator's own state files. Defaults to empty: an adapter
     /// opts in by knowing where its emulator stores states and how they're named.
     async fn scan_save_states(&self, _ctx: &ScanContext) -> Result<Vec<SaveState>, AdapterError> {
+        Ok(Vec::new())
+    }
+
+    /// Read this emulator's hotkey bindings from its own config, normalized to the
+    /// canonical action set and overlaid on the emulator's documented defaults
+    /// (see [`crate::hotkeys::overlay_defaults`]). Read-only. Defaults to empty: an
+    /// adapter opts in by knowing where its config lives and how bindings are
+    /// named. `ctx` reuses `ScanContext` for the Flatpak app-id redirect
+    /// (`rom_path`/`disc_key` are unused here).
+    async fn scan_hotkeys(&self, _ctx: &ScanContext) -> Result<Vec<EmulatorHotkey>, AdapterError> {
         Ok(Vec::new())
     }
 

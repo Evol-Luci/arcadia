@@ -10,6 +10,7 @@ import { Toast } from "./components/Toast";
 import { Home } from "./views/Home";
 import { Library } from "./views/Library";
 import { Recent } from "./views/Recent";
+import { Favorites } from "./views/Favorites";
 import { Collections } from "./views/Collections";
 import { Screenshots } from "./views/Screenshots";
 import { Achievements } from "./views/Achievements";
@@ -23,6 +24,7 @@ const TAB_ORDER: View[] = [
   "home",
   "library",
   "recent",
+  "favorites",
   "collections",
   "screenshots",
   "achievements",
@@ -174,6 +176,7 @@ export default function App() {
         {view === "home" && <Home profileId={profileId} />}
         {view === "library" && <Library profileId={profileId} />}
         {view === "recent" && <Recent profileId={profileId} />}
+        {view === "favorites" && <Favorites profileId={profileId} />}
         {view === "collections" && <Collections profileId={profileId} />}
         {view === "screenshots" && <Screenshots profileId={profileId} />}
         {view === "achievements" && <Achievements profileId={profileId} />}
