@@ -934,6 +934,46 @@ impl Engine {
         }
         self.emit_progress(profile_id, "artwork", "Box art complete", total, total, true);
 
+        // LaunchBox cover fallback (opt-in). Only runs when enabled AND the
+        // user has already downloaded an index — never triggers a download.
+        if let Some(provider) = self.launchbox_provider().await {
+            let games = sqlx::query_as::<_, Game>(
+                "SELECT * FROM games WHERE profile_id = ? AND cover_art IS NULL",
+            )
+            .bind(profile_id)
+            .fetch_all(&self.pool)
+            .await?;
+            if !games.is_empty() {
+                let total = games.len();
+                self.emit_progress(profile_id, "artwork", "LaunchBox covers", 0, total, false);
+                let provider = Arc::new(provider);
+                let sem = Arc::new(Semaphore::new(8));
+                let mut set = tokio::task::JoinSet::new();
+                for game in games {
+                    let provider = provider.clone();
+                    let sem = sem.clone();
+                    set.spawn(async move {
+                        let _permit = sem.acquire_owned().await.ok()?;
+                        let patch = provider.fetch(&game).await.ok()?;
+                        if patch.is_empty() {
+                            return None;
+                        }
+                        Some((game.id, patch))
+                    });
+                }
+                let mut processed = 0usize;
+                while let Some(res) = set.join_next().await {
+                    if let Ok(Some((id, patch))) = res {
+                        self.apply_patch(&id, &patch).await?;
+                        updated += 1;
+                    }
+                    processed += 1;
+                    self.emit_progress(profile_id, "artwork", "LaunchBox covers", processed, total, false);
+                }
+                self.emit_progress(profile_id, "artwork", "LaunchBox covers complete", total, total, true);
+            }
+        }
+
         // Text metadata pass (synopsis/genre/developer/publisher/date). No-ops
         // unless the user has configured ScreenScraper credentials.
         self.enrich_text_metadata(profile_id).await?;
