@@ -9,6 +9,7 @@ use crate::error::{EngineError, Result};
 use crate::models::Game;
 use crate::Engine;
 use async_trait::async_trait;
+use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::Semaphore;
@@ -36,6 +37,38 @@ impl MetadataPatch {
             && self.publisher.is_none()
             && self.release_date.is_none()
     }
+}
+
+/// A single cover suggestion for the interactive "Find" picker, tagged by the
+/// source it came from. `token` is what `apply_cover` needs to download it:
+/// the libretro box-art name, or the LaunchBox image file path.
+#[derive(Debug, Clone, Serialize)]
+pub struct CoverCandidate {
+    pub source: String, // "libretro" | "launchbox"
+    pub label: String,  // title to display
+    pub token: String,  // libretro name, or launchbox file_name
+}
+
+/// Merge ranked libretro names and ranked LaunchBox (name, file_name) pairs into
+/// one tagged list, libretro first (primary source).
+pub(crate) fn rank_cover_candidates(
+    libretro: Vec<String>,
+    launchbox: Vec<(String, String)>,
+) -> Vec<CoverCandidate> {
+    let mut out: Vec<CoverCandidate> = libretro
+        .into_iter()
+        .map(|name| CoverCandidate {
+            source: "libretro".into(),
+            label: name.clone(),
+            token: name,
+        })
+        .collect();
+    out.extend(launchbox.into_iter().map(|(name, file_name)| CoverCandidate {
+        source: "launchbox".into(),
+        label: name,
+        token: file_name,
+    }));
+    out
 }
 
 #[async_trait]
@@ -570,6 +603,21 @@ mod tests {
         assert!(parse_screenscraper_json("not json", "en").is_empty());
         assert!(parse_screenscraper_json(r#"{"response":{}}"#, "en").is_empty());
     }
+
+    #[test]
+    fn rank_cover_candidates_lists_libretro_first_and_tags_sources() {
+        let out = rank_cover_candidates(
+            vec!["Street Fighter II".into()],
+            vec![("Street Fighter II Turbo".into(), "s/sf2t.jpg".into())],
+        );
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].source, "libretro");
+        assert_eq!(out[0].label, "Street Fighter II");
+        assert_eq!(out[0].token, "Street Fighter II"); // libretro token == name
+        assert_eq!(out[1].source, "launchbox");
+        assert_eq!(out[1].label, "Street Fighter II Turbo");
+        assert_eq!(out[1].token, "s/sf2t.jpg"); // launchbox token == file_name
+    }
 }
 
 #[async_trait]
@@ -1061,20 +1109,29 @@ impl Engine {
         Ok(cover)
     }
 
-    /// Re-fetch a single game's box art from libretro. With `query` the caller
-    /// supplies libretro's own title (e.g. a subtitle the ROM filename omits);
-    /// without it, the auto-derived candidates are retried. Returns whether a
-    /// cover was found.
-    pub async fn refetch_cover(&self, game_id: &str, query: Option<&str>) -> Result<bool> {
+    /// Apply a cover the user picked from `suggest_covers`. Routes by `source`:
+    /// `"libretro"` re-fetches by the libretro box-art name; `"launchbox"`
+    /// downloads the specific image file. Returns whether a cover was applied
+    /// (false when the download produced nothing).
+    pub async fn apply_cover(&self, game_id: &str, source: &str, token: &str) -> Result<bool> {
         let game = self
             .get_game(game_id)
             .await?
             .ok_or_else(|| EngineError::NotFound(format!("game {game_id}")))?;
-        let provider = LibretroThumbnailProvider::new(self.paths.artwork_dir());
-        let patch = match query.map(str::trim).filter(|q| !q.is_empty()) {
-            Some(q) => provider.fetch_named(&game, q).await,
-            None => provider.fetch(&game).await?,
+
+        let patch = match source {
+            "libretro" => {
+                LibretroThumbnailProvider::new(self.paths.artwork_dir())
+                    .fetch_named(&game, token)
+                    .await
+            }
+            "launchbox" => match self.launchbox_provider().await {
+                Some(provider) => provider.fetch_file(&game, token).await,
+                None => MetadataPatch::default(),
+            },
+            other => return Err(EngineError::Invalid(format!("unknown cover source: {other}"))),
         };
+
         if patch.is_empty() {
             return Ok(false);
         }
@@ -1082,21 +1139,30 @@ impl Engine {
         Ok(true)
     }
 
-    /// Suggest the closest libretro box-art names for a game so the user can
-    /// pick the right one when auto-matching fails (e.g. the ROM omits a
-    /// subtitle libretro includes). `query` overrides the search text; otherwise
-    /// the game's title is used.
-    pub async fn suggest_covers(&self, game_id: &str, query: Option<&str>) -> Result<Vec<String>> {
+    /// Suggest the closest box-art candidates for a game so the user can pick
+    /// the right one when auto-matching fails. Libretro is always consulted;
+    /// LaunchBox is appended only when the feature is enabled and an index
+    /// exists. `query` overrides the search text; otherwise the title is used.
+    pub async fn suggest_covers(&self, game_id: &str, query: Option<&str>) -> Result<Vec<CoverCandidate>> {
         let game = self
             .get_game(game_id)
             .await?
             .ok_or_else(|| EngineError::NotFound(format!("game {game_id}")))?;
-        let provider = LibretroThumbnailProvider::new(self.paths.artwork_dir());
         let q = query
             .map(str::trim)
             .filter(|q| !q.is_empty())
             .unwrap_or(&game.title);
-        Ok(provider.suggest(&game.platform, q, 12).await)
+
+        let libretro = LibretroThumbnailProvider::new(self.paths.artwork_dir())
+            .suggest(&game.platform, q, 12)
+            .await;
+
+        let launchbox = match self.launchbox_provider().await {
+            Some(provider) => provider.search(&game.platform, q, 12).await,
+            None => Vec::new(),
+        };
+
+        Ok(rank_cover_candidates(libretro, launchbox))
     }
 
     async fn apply_patch(&self, game_id: &str, patch: &MetadataPatch) -> Result<()> {

@@ -436,6 +436,12 @@ impl LaunchBoxProvider {
         }
         patch
     }
+
+    /// Fuzzy-search this provider's index for the platform. Thin wrapper over
+    /// `search_covers` that uses the provider's own pool.
+    pub(crate) async fn search(&self, platform: &str, query: &str, limit: usize) -> Vec<(String, String)> {
+        search_covers(&self.pool, platform, query, limit).await
+    }
 }
 
 #[async_trait]
