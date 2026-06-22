@@ -203,6 +203,7 @@ impl LibretroThumbnailProvider {
             "xbox" => "Microsoft - Xbox",
             "ngp" => "SNK - Neo Geo Pocket",
             "wonderswan" => "Bandai - WonderSwan",
+            "arcade" => "MAME",
             _ => return None,
         })
     }
@@ -514,6 +515,13 @@ mod tests {
         std::fs::create_dir_all(&tmp).unwrap();
         assert!(ps3_disc_art(&tmp.to_string_lossy()).is_none());
         std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn libretro_system_name_maps_arcade_to_mame() {
+        assert_eq!(LibretroThumbnailProvider::system_name("arcade"), Some("MAME"));
+        assert_eq!(LibretroThumbnailProvider::system_name("snes"), Some("Nintendo - Super Nintendo Entertainment System"));
+        assert_eq!(LibretroThumbnailProvider::system_name("not_a_platform"), None);
     }
 
     #[test]

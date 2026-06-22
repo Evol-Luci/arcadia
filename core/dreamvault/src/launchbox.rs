@@ -62,6 +62,7 @@ pub(crate) fn arcadia_slug_for_launchbox(name: &str) -> Option<&'static str> {
         "Microsoft Xbox" => "xbox",
         "SNK Neo Geo Pocket" => "ngp",
         "WonderSwan" => "wonderswan",
+        "Arcade" => "arcade",
         _ => return None,
     })
 }
@@ -491,6 +492,7 @@ mod tests {
     fn platform_mapping_known_and_unknown() {
         assert_eq!(arcadia_slug_for_launchbox("Super Nintendo Entertainment System"), Some("snes"));
         assert_eq!(arcadia_slug_for_launchbox("Sony Playstation"), Some("ps1"));
+        assert_eq!(arcadia_slug_for_launchbox("Arcade"), Some("arcade"));
         assert_eq!(arcadia_slug_for_launchbox("Sega Pico"), None);
     }
 
