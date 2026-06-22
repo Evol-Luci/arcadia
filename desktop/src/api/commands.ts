@@ -10,6 +10,7 @@ import type {
   ConsolePad,
   ControllerConfig,
   ControllerProfile,
+  CoverCandidate,
   Emulator,
   MaterializePreview,
   SystemControllerProfile,
@@ -96,9 +97,9 @@ export const api = {
   setGameCover: (gameId: string, sourcePath: string) =>
     invoke<string>("set_game_cover", { gameId, sourcePath }),
   suggestCovers: (gameId: string, query: string | null) =>
-    invoke<string[]>("suggest_covers", { gameId, query }),
-  refetchCover: (gameId: string, query: string | null) =>
-    invoke<boolean>("refetch_cover", { gameId, query }),
+    invoke<CoverCandidate[]>("suggest_covers", { gameId, query }),
+  applyCover: (gameId: string, source: string, token: string) =>
+    invoke<boolean>("apply_cover", { gameId, source, token }),
   launchGame: (gameId: string) =>
     invoke<LaunchResult>("launch_game", { gameId }),
   listDiscs: (gameId: string) => invoke<GameDisc[]>("list_discs", { gameId }),

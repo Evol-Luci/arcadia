@@ -192,6 +192,12 @@ export interface RaGameCandidate {
   title: string;
 }
 
+export interface CoverCandidate {
+  source: "libretro" | "launchbox";
+  label: string;
+  token: string;
+}
+
 export interface RaUserSummary {
   username: string;
   total_points: number;

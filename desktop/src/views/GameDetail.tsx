@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { open } from "@tauri-apps/api/dialog";
 import { api, artworkUrl } from "../api/commands";
+import type { CoverCandidate } from "../api/types";
 import { useStore } from "../store/useStore";
 import { Focusable } from "../components/Focusable";
 import { noteGameLaunched } from "../nav/spatialNav";
@@ -23,7 +24,7 @@ export function GameDetail({ gameId }: { gameId: string }) {
   const coverVersion = useStore((s) => s.coverVersion);
   const bumpCoverVersion = useStore((s) => s.bumpCoverVersion);
   const [artQuery, setArtQuery] = useState("");
-  const [suggestions, setSuggestions] = useState<string[]>([]);
+  const [suggestions, setSuggestions] = useState<CoverCandidate[]>([]);
   const [showLaunchSettings, setShowLaunchSettings] = useState(false);
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleDraft, setTitleDraft] = useState("");
@@ -187,13 +188,13 @@ export function GameDetail({ gameId }: { gameId: string }) {
     onSuccess: (list) => {
       setSuggestions(list);
       if (list.length === 0)
-        setToast("No close matches on libretro — try different words or pick a local file.");
+        setToast("No close matches — try different words or pick a local file.");
     },
     onError: (e: unknown) => setToast(`Search failed: ${String(e)}`),
   });
 
   const applyCover = useMutation({
-    mutationFn: (name: string) => api.refetchCover(gameId, name),
+    mutationFn: (c: CoverCandidate) => api.applyCover(gameId, c.source, c.token),
     onSuccess: (found) => {
       setSuggestions([]);
       if (found) {
@@ -261,14 +262,17 @@ export function GameDetail({ gameId }: { gameId: string }) {
 
             {suggestions.length > 0 && (
               <ul className="flex max-h-72 flex-col gap-1 overflow-y-auto">
-                {suggestions.map((name) => (
+                {suggestions.map((c, i) => (
                   <Focusable
-                    key={name}
-                    onActivate={() => applyCover.mutate(name)}
-                    ariaLabel={`Use ${name}`}
-                    className="glass rounded-lg px-2.5 py-1.5 text-left text-[11px] leading-snug"
+                    key={`${c.source}:${c.token}:${i}`}
+                    onActivate={() => applyCover.mutate(c)}
+                    ariaLabel={`Use ${c.label} from ${c.source}`}
+                    className="glass flex items-center justify-between gap-2 rounded-lg px-2.5 py-1.5 text-left text-[11px] leading-snug"
                   >
-                    {name}
+                    <span className="min-w-0 flex-1 truncate">{c.label}</span>
+                    <span className="shrink-0 text-[9px] uppercase tracking-wide text-ink-dim/70">
+                      {c.source === "launchbox" ? "LaunchBox" : "libretro"}
+                    </span>
                   </Focusable>
                 ))}
               </ul>
