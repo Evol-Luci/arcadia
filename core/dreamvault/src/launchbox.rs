@@ -402,6 +402,40 @@ impl LaunchBoxProvider {
             .join(&game.platform)
             .join(format!("{safe}.{ext}"))
     }
+
+    /// Download a specific LaunchBox image `file_name` for `game`, caching it
+    /// under the artwork dir. Returns a cover-only patch (empty if the download
+    /// fails). Used by both auto-scan `fetch` and the interactive apply path.
+    pub(crate) async fn fetch_file(&self, game: &Game, file_name: &str) -> MetadataPatch {
+        let mut patch = MetadataPatch::default();
+        let cached = self.cache_path(game, file_name);
+        if cached.is_file() {
+            patch.cover_art = Some(cached.to_string_lossy().to_string());
+            return patch;
+        }
+
+        let url = image_url(file_name);
+        let resp = match self.client.get(&url).send().await {
+            Ok(r) if r.status().is_success() => r,
+            Ok(r) => {
+                tracing::debug!(%url, status = %r.status(), "launchbox image miss");
+                return patch;
+            }
+            Err(e) => {
+                tracing::debug!(%url, error = %e, "launchbox image request failed");
+                return patch;
+            }
+        };
+        let Ok(bytes) = resp.bytes().await else { return patch };
+        if let Some(parent) = cached.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if std::fs::write(&cached, &bytes).is_ok() {
+            tracing::info!(game = %game.title, "fetched box art from launchbox");
+            patch.cover_art = Some(cached.to_string_lossy().to_string());
+        }
+        patch
+    }
 }
 
 #[async_trait]
@@ -411,39 +445,11 @@ impl MetadataProvider for LaunchBoxProvider {
     }
 
     async fn fetch(&self, game: &Game) -> Result<MetadataPatch> {
-        let mut patch = MetadataPatch::default();
         let norm = normalize_name(&game.title);
         let Some(file_name) = lookup_cover(&self.pool, &game.platform, &norm).await else {
-            return Ok(patch);
+            return Ok(MetadataPatch::default());
         };
-
-        let cached = self.cache_path(game, &file_name);
-        if cached.is_file() {
-            patch.cover_art = Some(cached.to_string_lossy().to_string());
-            return Ok(patch);
-        }
-
-        let url = image_url(&file_name);
-        let resp = match self.client.get(&url).send().await {
-            Ok(r) if r.status().is_success() => r,
-            Ok(r) => {
-                tracing::debug!(%url, status = %r.status(), "launchbox image miss");
-                return Ok(patch);
-            }
-            Err(e) => {
-                tracing::debug!(%url, error = %e, "launchbox image request failed");
-                return Ok(patch);
-            }
-        };
-        let Ok(bytes) = resp.bytes().await else { return Ok(patch) };
-        if let Some(parent) = cached.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        if std::fs::write(&cached, &bytes).is_ok() {
-            tracing::info!(game = %game.title, "fetched box art from launchbox");
-            patch.cover_art = Some(cached.to_string_lossy().to_string());
-        }
-        Ok(patch)
+        Ok(self.fetch_file(game, &file_name).await)
     }
 }
 
@@ -526,6 +532,57 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sample_game(platform: &str, rom_path: &str, title: &str) -> Game {
+        Game {
+            id: "g1".into(),
+            profile_id: "p1".into(),
+            title: title.into(),
+            custom_title: None,
+            sort_title: title.to_ascii_lowercase(),
+            platform: platform.into(),
+            rom_path: rom_path.into(),
+            file_size: 0,
+            emulator_id: None,
+            cover_art: None,
+            background_art: None,
+            description: None,
+            genre: None,
+            developer: None,
+            publisher: None,
+            release_date: None,
+            playtime_minutes: 0,
+            launch_count: 0,
+            favorite: false,
+            last_played: None,
+            added_at: chrono::Utc::now(),
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_file_returns_cached_without_network() {
+        let dir = std::env::temp_dir().join(format!("arcadia_lb_fetchfile_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("index.sqlite");
+        build_index_db(&db, &[]).await.unwrap();
+        let pool = open_index_pool(&db).await.unwrap();
+
+        let cache_root = dir.join("art");
+        let provider = LaunchBoxProvider::new(cache_root, pool);
+        let game = sample_game("snes", "/roms/snes/Super Mario World.sfc", "Super Mario World");
+
+        // Pre-create the exact cache file the provider will compute, so no
+        // network call happens.
+        let cached = provider.cache_path(&game, "a/b/smw.jpg");
+        std::fs::create_dir_all(cached.parent().unwrap()).unwrap();
+        std::fs::write(&cached, b"img").unwrap();
+
+        let patch = provider.fetch_file(&game, "a/b/smw.jpg").await;
+        assert_eq!(patch.cover_art.as_deref(), Some(cached.to_string_lossy().as_ref()));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn normalize_collapses_punctuation_and_case() {
