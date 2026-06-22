@@ -11,6 +11,7 @@ use dreamvault::config::{
 use dreamvault::console_pads::ConsolePad;
 use dreamvault::controller::{ApplyOutcome, HidapiStatus, MaterializePreview};
 use dreamvault::library::{GameQuery, ScanReport};
+use dreamvault::metadata::CoverCandidate;
 use dreamvault::models::{
     Achievement, Collection, CollectionSummary, Emulator, Game, GameDisc, GameSettings,
     LibraryStats, Profile, RaLink, RomSource, SaveBackup, Screenshot,
@@ -293,24 +294,27 @@ pub async fn set_game_cover(
     map(state.engine.set_game_cover(&game_id, &source_path).await)
 }
 
-/// Closest libretro box-art names for a game, ranked, for the user to choose.
+/// Closest box-art candidates for a game, ranked and tagged by source, for the
+/// user to choose from in the Find picker.
 #[tauri::command]
 pub async fn suggest_covers(
     state: State<'_, AppState>,
     game_id: String,
     query: Option<String>,
-) -> CmdResult<Vec<String>> {
+) -> CmdResult<Vec<CoverCandidate>> {
     map(state.engine.suggest_covers(&game_id, query.as_deref()).await)
 }
 
-/// Re-fetch one game's box art from libretro, optionally with a corrected name.
+/// Apply a cover the user picked in the Find picker. `source` is "libretro" or
+/// "launchbox"; `token` is the libretro box-art name or the launchbox file path.
 #[tauri::command]
-pub async fn refetch_cover(
+pub async fn apply_cover(
     state: State<'_, AppState>,
     game_id: String,
-    query: Option<String>,
+    source: String,
+    token: String,
 ) -> CmdResult<bool> {
-    map(state.engine.refetch_cover(&game_id, query.as_deref()).await)
+    map(state.engine.apply_cover(&game_id, &source, &token).await)
 }
 
 // ---- Stats + collections --------------------------------------------------

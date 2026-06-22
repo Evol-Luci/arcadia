@@ -130,7 +130,7 @@ fn main() {
             commands::set_game_settings,
             commands::set_game_cover,
             commands::suggest_covers,
-            commands::refetch_cover,
+            commands::apply_cover,
             commands::launch_game,
             commands::list_discs,
             commands::launch_game_disc,
