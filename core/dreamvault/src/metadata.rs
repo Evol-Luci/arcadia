@@ -408,7 +408,7 @@ impl LibretroThumbnailProvider {
 }
 
 /// Lowercase, split on any non-alphanumeric, drop empties.
-fn normalize_tokens(s: &str) -> Vec<String> {
+pub(crate) fn normalize_tokens(s: &str) -> Vec<String> {
     s.to_ascii_lowercase()
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { ' ' })
@@ -419,7 +419,7 @@ fn normalize_tokens(s: &str) -> Vec<String> {
 }
 
 /// Token-overlap score with a contiguous-substring bonus. Higher is closer.
-fn match_score(qt: &[String], qjoined: &str, name: &str) -> f64 {
+pub(crate) fn match_score(qt: &[String], qjoined: &str, name: &str) -> f64 {
     if qt.is_empty() {
         return 0.0;
     }

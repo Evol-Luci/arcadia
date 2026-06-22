@@ -83,6 +83,7 @@ use std::collections::HashMap;
 pub(crate) struct IndexRow {
     pub platform: String,
     pub norm_name: String,
+    pub name: String,
     pub file_name: String,
 }
 
@@ -125,8 +126,8 @@ pub(crate) fn parse_metadata_xml<R: std::io::BufRead>(reader: R) -> Vec<IndexRow
 
     // db_id -> arcadia slug (only supported platforms)
     let mut game_platform: HashMap<String, String> = HashMap::new();
-    // db_id -> set of normalized names (primary + alternates)
-    let mut game_names: HashMap<String, Vec<String>> = HashMap::new();
+    // db_id -> list of (normalized name, original name) for primary + alternates
+    let mut game_names: HashMap<String, Vec<(String, String)>> = HashMap::new();
     // db_id -> (best file_name, best score) for Box - Front
     let mut box_front: HashMap<String, (String, i32)> = HashMap::new();
 
@@ -186,7 +187,7 @@ pub(crate) fn parse_metadata_xml<R: std::io::BufRead>(reader: R) -> Vec<IndexRow
                                 game_names
                                     .entry(g_id.clone())
                                     .or_default()
-                                    .push(normalize_name(&g_name));
+                                    .push((normalize_name(&g_name), g_name.trim().to_string()));
                             }
                         }
                         section = Section::None;
@@ -196,7 +197,7 @@ pub(crate) fn parse_metadata_xml<R: std::io::BufRead>(reader: R) -> Vec<IndexRow
                             game_names
                                 .entry(a_id.clone())
                                 .or_default()
-                                .push(normalize_name(&a_name));
+                                .push((normalize_name(&a_name), a_name.trim().to_string()));
                         }
                         section = Section::None;
                     }
@@ -232,7 +233,7 @@ pub(crate) fn parse_metadata_xml<R: std::io::BufRead>(reader: R) -> Vec<IndexRow
     for (id, platform) in &game_platform {
         let Some((file_name, _)) = box_front.get(id) else { continue };
         let Some(names) = game_names.get(id) else { continue };
-        for norm in names {
+        for (norm, original) in names {
             if norm.is_empty() {
                 continue;
             }
@@ -241,6 +242,7 @@ pub(crate) fn parse_metadata_xml<R: std::io::BufRead>(reader: R) -> Vec<IndexRow
                 rows.push(IndexRow {
                     platform: platform.clone(),
                     norm_name: norm.clone(),
+                    name: original.clone(),
                     file_name: file_name.clone(),
                 });
             }
@@ -261,16 +263,17 @@ pub(crate) async fn build_index_db(db_path: &Path, rows: &[IndexRow]) -> Result<
         .journal_mode(sqlx::sqlite::SqliteJournalMode::Delete);
     let pool = SqlitePoolOptions::new().max_connections(1).connect_with(opts).await?;
 
-    sqlx::query("CREATE TABLE covers (platform TEXT NOT NULL, norm_name TEXT NOT NULL, file_name TEXT NOT NULL, PRIMARY KEY (platform, norm_name))")
+    sqlx::query("CREATE TABLE covers (platform TEXT NOT NULL, norm_name TEXT NOT NULL, name TEXT NOT NULL, file_name TEXT NOT NULL, PRIMARY KEY (platform, norm_name))")
         .execute(&pool)
         .await?;
 
     let mut tx = pool.begin().await?;
     let mut inserted = 0usize;
     for row in rows {
-        let res = sqlx::query("INSERT OR IGNORE INTO covers (platform, norm_name, file_name) VALUES (?, ?, ?)")
+        let res = sqlx::query("INSERT OR IGNORE INTO covers (platform, norm_name, name, file_name) VALUES (?, ?, ?, ?)")
             .bind(&row.platform)
             .bind(&row.norm_name)
+            .bind(&row.name)
             .bind(&row.file_name)
             .execute(&mut *tx)
             .await?;
@@ -299,6 +302,49 @@ pub(crate) async fn lookup_cover(pool: &SqlitePool, platform: &str, norm_name: &
         .await
         .ok()
         .flatten()
+}
+
+/// Fuzzy-search the index for a platform. Prefilters candidates with a SQL LIKE
+/// on the longest normalized query token (the most selective), then ranks them
+/// in Rust with the same token-overlap scoring libretro's suggest uses. Returns
+/// up to `limit` (display name, image file path) pairs, best first.
+pub(crate) async fn search_covers(
+    pool: &SqlitePool,
+    platform: &str,
+    query: &str,
+    limit: usize,
+) -> Vec<(String, String)> {
+    let qt = crate::metadata::normalize_tokens(query);
+    if qt.is_empty() {
+        return Vec::new();
+    }
+    let qjoined = qt.join(" ");
+    let longest = qt.iter().max_by_key(|t| t.len()).cloned().unwrap_or_default();
+    let like = format!("%{longest}%");
+    let candidates: Vec<(String, String)> = sqlx::query_as::<_, (String, String)>(
+        "SELECT name, file_name FROM covers WHERE platform = ? AND norm_name LIKE ? LIMIT 5000",
+    )
+    .bind(platform)
+    .bind(&like)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+
+    let mut scored: Vec<(f64, String, String)> = candidates
+        .into_iter()
+        .map(|(name, file_name)| (crate::metadata::match_score(&qt, &qjoined, &name), name, file_name))
+        .filter(|(s, _, _)| *s > 0.0)
+        .collect();
+    scored.sort_by(|a, b| {
+        b.0.partial_cmp(&a.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.1.len().cmp(&b.1.len()))
+    });
+    scored
+        .into_iter()
+        .take(limit)
+        .map(|(_, name, file_name)| (name, file_name))
+        .collect()
 }
 
 /// Percent-encode each path segment of a GameImage `FileName`, preserving `/`.
@@ -572,8 +618,8 @@ mod tests {
         let db = dir.join("index.sqlite");
 
         let rows = vec![
-            IndexRow { platform: "snes".into(), norm_name: "super mario world".into(), file_name: "a/b/smw.jpg".into() },
-            IndexRow { platform: "snes".into(), norm_name: "super mario bros 4".into(), file_name: "a/b/smw.jpg".into() },
+            IndexRow { platform: "snes".into(), norm_name: "super mario world".into(), name: "Super Mario World".into(), file_name: "a/b/smw.jpg".into() },
+            IndexRow { platform: "snes".into(), norm_name: "super mario bros 4".into(), name: "Super Mario Bros. 4".into(), file_name: "a/b/smw.jpg".into() },
         ];
         let n = build_index_db(&db, &rows).await.unwrap();
         assert_eq!(n, 2);
@@ -583,6 +629,33 @@ mod tests {
         assert_eq!(lookup_cover(&pool, "snes", "super mario bros 4").await.as_deref(), Some("a/b/smw.jpg"));
         assert_eq!(lookup_cover(&pool, "snes", "unknown game").await, None);
         assert_eq!(lookup_cover(&pool, "n64", "super mario world").await, None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn search_covers_ranks_token_overlap() {
+        let dir = std::env::temp_dir().join(format!("arcadia_lb_search_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("index.sqlite");
+
+        let rows = vec![
+            IndexRow { platform: "arcade".into(), norm_name: "street fighter ii".into(), name: "Street Fighter II".into(), file_name: "s/sf2.jpg".into() },
+            IndexRow { platform: "arcade".into(), norm_name: "street fighter alpha".into(), name: "Street Fighter Alpha".into(), file_name: "s/sfa.jpg".into() },
+            IndexRow { platform: "arcade".into(), norm_name: "metal slug".into(), name: "Metal Slug".into(), file_name: "m/ms.jpg".into() },
+        ];
+        build_index_db(&db, &rows).await.unwrap();
+        let pool = open_index_pool(&db).await.unwrap();
+
+        let hits = search_covers(&pool, "arcade", "street fighter ii", 12).await;
+        assert_eq!(hits.first().map(|(n, _)| n.as_str()), Some("Street Fighter II"));
+        assert_eq!(hits.first().map(|(_, f)| f.as_str()), Some("s/sf2.jpg"));
+        // "metal slug" shares no token with the query and is filtered out.
+        assert!(hits.iter().all(|(n, _)| n != "Metal Slug"));
+
+        // Wrong platform returns nothing.
+        assert!(search_covers(&pool, "snes", "street fighter ii", 12).await.is_empty());
 
         let _ = std::fs::remove_dir_all(&dir);
     }
